@@ -10,8 +10,9 @@ While Gaussian Splatting is powerful, integrating it into professional workflows
 3. Create animations and motion graphics
    
 ## Documentation and Tutorials:
-The written documentation can be found at  [KIRI Blender addon docs](https://www.kiriengine.app/blender-addon))
-The tutorial playlist can be found here [https://www.youtube.com/watch?v=WUL73wQDtcE&t=634s](https://youtu.be/v3Ii0Yg655U?si=M7ioTE5GAS_PHXUf)
+The written documentation can be found at https://www.kiriengine.app/3d-tools
+
+Video tutorials can be found here https://www.youtube.com/@3D-Tools-by-KIRI-Engine
 
 ## Questions:
 If you run into any issues or questions, feel free to ask on our [Discord thread](https://discord.com/channels/952917583659667517/1289563910390812723)
