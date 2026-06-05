@@ -15,8 +15,8 @@ bl_info = {
     "name" : "3DGS Render by KIRI Engine",
     "author" : "KIRI ENGINE", 
     "description" : "3DGS creation, render and editing suite",
-    "blender" : (4, 3, 0),
-    "version" : (4, 1, 5),
+    "blender" : (5, 1, 0),
+    "version" : (5, 0, 0),
     "location" : "N Panel",
     "warning" : "",
     "doc_url": "https://www.kiriengine.app/blender-addon/3dgs-render", 
@@ -31,18 +31,19 @@ import webbrowser
 import os
 import math
 from bpy_extras.io_utils import ImportHelper, ExportHelper
+import importlib.util
+import types
 import subprocess
 import sys
-import tempfile
-import shutil
+import platform
 import gpu.state
 import numpy as np
 import time
-import gpu
-from gpu_extras.batch import batch_for_shader
-import uuid
-from math import pi
+import gpu.types
 from mathutils import Matrix
+import re
+from mathutils import Vector
+from bpy.app.handlers import persistent
 from typing import Optional
 
 
@@ -50,9 +51,10 @@ addon_keymaps = {}
 _icons = None
 dgs_render__active_3dgs_object = {'sna_apply_modifier_list': [], 'sna_in_camera_view': False, }
 dgs_render__collection_snippets = {'sna_collections_temp_list': [], }
+dgs_render__export = {'sna_export_base_object': None, 'sna_export_temp_object': None, 'sna_export_frame_count': 0, }
 dgs_render__hq_mode = {'sna_lq_object_list': [], }
-dgs_render_modeon_property_update = {'sna_dgs_proxies_in_scene': False, }
 dgs_renderdb_filter = {'sna_db_filter_input_object': None, 'sna_db_filter_force_scale_factor': 0.0, }
+dgs_on_prop_update_on_render = {'sna_dgs_proxies_in_scene': False, }
 
 
 def sna_update_update_mode_868D4(self, context):
@@ -90,11 +92,11 @@ def sna_update_hq_overlap_DDF15(self, context):
 
 def sna_update_lq_hq_065F9(self, context):
     sna_updated_prop = self.lq_hq
-    self.surface_render_method = ('BLENDED' if (sna_updated_prop == 'HQ Mode (Blended Alpha)') else 'DITHERED')
+    self.id_data.surface_render_method = ('BLENDED' if (sna_updated_prop == 'HQ Mode (Blended Alpha)') else 'DITHERED')
     for i_DF01B in range(len(bpy.data.objects)):
         if (property_exists("bpy.data.objects[i_DF01B].modifiers", globals(), locals()) and 'KIRI_3DGS_Sorter_GN' in bpy.data.objects[i_DF01B].modifiers):
             for i_19853 in range(len(bpy.data.objects[i_DF01B].material_slots)):
-                if (bpy.data.objects[i_DF01B].material_slots[i_19853].material == self):
+                if (bpy.data.objects[i_DF01B].material_slots[i_19853].material == self.id_data):
                     bpy.data.objects[i_DF01B].modifiers['KIRI_3DGS_Sorter_GN'].show_viewport = (sna_updated_prop == 'HQ Mode (Blended Alpha)')
                     bpy.data.objects[i_DF01B].modifiers['KIRI_3DGS_Sorter_GN'].show_render = (sna_updated_prop == 'HQ Mode (Blended Alpha)')
                     if (property_exists("bpy.context.scene.objects", globals(), locals()) and 'KIRI_HQ_Merged_Object' in bpy.context.scene.objects):
@@ -110,17 +112,7 @@ def sna_update_lq_hq_065F9(self, context):
                             bpy.data.objects[i_DF01B].hide_render = False
 
 
-def load_preview_icon(path):
-    global _icons
-    if not path in _icons:
-        if os.path.exists(path):
-            _icons.load(path, path, "IMAGE")
-        else:
-            return 0
-    return _icons[path].icon_id
-
-
-def sna_update_active_mode_4A881(self, context):
+def sna_update_active_mode_86E6B(self, context):
     sna_updated_prop = self.active_mode
     if sna_updated_prop == "Edit":
         for i_DE1DF in range(len(bpy.context.scene.objects)):
@@ -130,63 +122,78 @@ def sna_update_active_mode_4A881(self, context):
                 if (property_exists("bpy.context.scene.objects[i_DE1DF].modifiers", globals(), locals()) and 'KIRI_3DGS_Write F_DC_And_Merge' in bpy.context.scene.objects[i_DE1DF].modifiers):
                     bpy.context.scene.objects[i_DE1DF].modifiers['KIRI_3DGS_Write F_DC_And_Merge'].show_viewport = False
                     bpy.context.scene.objects[i_DE1DF].modifiers['KIRI_3DGS_Write F_DC_And_Merge'].show_render = False
-                if '3dgs_is_hidden' in bpy.context.scene.objects[i_DE1DF]:
-                    bpy.context.scene.objects[i_DE1DF].hide_viewport = bpy.context.scene.objects[i_DE1DF]['3dgs_is_hidden']
-                else:
-                    bpy.context.scene.objects[i_DE1DF]['3dgs_is_hidden'] = False
-                    bpy.context.view_layer.objects.active.hide_viewport = False
-                if bpy.context.scene.sna_dgs_scene_properties.r2_hide_on_change:
-                    target_object = bpy.context.scene.objects[i_DE1DF]
-                    hide_set = False
-                    # Input variables
-                    #target_object = bpy.data.objects["Cube"]  # Change this to your object
-                    #hide_set = True  # True to hide set, False to unhide set
-                    if target_object:
-                        target_object.hide_set(hide_set)
-                        action = "applied" if hide_set else "removed"
-                        print(f"Hide set {action} to: {target_object.name}")
+                    if '3dgs_is_hidden' in bpy.context.scene.objects[i_DE1DF]:
+                        bpy.context.scene.objects[i_DE1DF].hide_viewport = bpy.context.scene.objects[i_DE1DF]['3dgs_is_hidden']
                     else:
-                        print("Target object not found")
+                        bpy.context.scene.objects[i_DE1DF]['3dgs_is_hidden'] = False
+                        bpy.context.view_layer.objects.active.hide_viewport = False
+                    if bpy.context.scene.sna_dgs_scene_properties.r2_hide_on_change:
+                        target_object = bpy.context.scene.objects[i_DE1DF]
+                        hide_set = False
+                        # Input variables (Assuming these are passed in from your node setup)
+                        # target_object = bpy.data.objects.get("Cube")  # Use .get() instead of [] to avoid KeyErrors!
+                        # hide_set = True
+                        if target_object:
+                            # THE FIX: Verify the object is in the current View Layer
+                            if target_object.name in bpy.context.view_layer.objects:
+                                target_object.hide_set(hide_set)
+                                action = "applied" if hide_set else "removed"
+                                print(f"Hide set {action} to: {target_object.name}")
+                            else:
+                                # Failsafe if the object is in memory but not in the scene
+                                print(f"Skipped: '{target_object.name}' exists in data, but is not in the current View Layer.")
+                        else:
+                            print("Target object not found.")
         sna_clean_up_scene_5F1F1(False)
+        if bpy.context.scene.sna_dgs_scene_properties.r2_render_rig_cache_mode == "Enabled Baked":
+            sna_rig_5_apply_baked_cache_5656F('All Bound', None)
+        else:
+            pass
     elif sna_updated_prop == "Render":
         bpy.context.scene.sna_dgs_scene_properties.r2_main_mode = 'Update'
         for i_14280 in range(len(bpy.context.scene.objects)):
             if (property_exists("bpy.context.scene.objects[i_14280].modifiers", globals(), locals()) and 'KIRI_3DGS_Render_GN' in bpy.context.scene.objects[i_14280].modifiers):
                 bpy.context.scene.objects[i_14280].modifiers['KIRI_3DGS_Render_GN'].show_viewport = False
                 bpy.context.scene.objects[i_14280].modifiers['KIRI_3DGS_Render_GN'].show_render = False
-                if (property_exists("bpy.context.scene.objects[i_14280].modifiers", globals(), locals()) and 'KIRI_3DGS_Write F_DC_And_Merge' in bpy.context.scene.objects[i_14280].modifiers):
-                    bpy.context.scene.objects[i_14280].modifiers['KIRI_3DGS_Write F_DC_And_Merge'].show_viewport = True
-                    bpy.context.scene.objects[i_14280].modifiers['KIRI_3DGS_Write F_DC_And_Merge'].show_render = True
                 bpy.context.scene.objects[i_14280]['3dgs_is_hidden'] = bpy.context.scene.objects[i_14280].hide_viewport
                 if bpy.context.scene.sna_dgs_scene_properties.r2_hide_on_change:
                     target_object = bpy.context.scene.objects[i_14280]
                     hide_set = True
-                    # Input variables
-                    #target_object = bpy.data.objects["Cube"]  # Change this to your object
-                    #hide_set = True  # True to hide set, False to unhide set
+                    # Input variables (Assuming these are passed in from your node setup)
+                    # target_object = bpy.data.objects.get("Cube")  # Use .get() instead of [] to avoid KeyErrors!
+                    # hide_set = True
                     if target_object:
-                        target_object.hide_set(hide_set)
-                        action = "applied" if hide_set else "removed"
-                        print(f"Hide set {action} to: {target_object.name}")
+                        # THE FIX: Verify the object is in the current View Layer
+                        if target_object.name in bpy.context.view_layer.objects:
+                            target_object.hide_set(hide_set)
+                            action = "applied" if hide_set else "removed"
+                            print(f"Hide set {action} to: {target_object.name}")
+                        else:
+                            # Failsafe if the object is in memory but not in the scene
+                            print(f"Skipped: '{target_object.name}' exists in data, but is not in the current View Layer.")
                     else:
-                        print("Target object not found")
-        dgs_render_modeon_property_update['sna_dgs_proxies_in_scene'] = False
+                        print("Target object not found.")
+        dgs_on_prop_update_on_render['sna_dgs_proxies_in_scene'] = False
         for i_517A6 in range(len(bpy.context.scene.objects)):
             if 'gaussian_source_uuid' in bpy.context.scene.objects[i_517A6]:
-                dgs_render_modeon_property_update['sna_dgs_proxies_in_scene'] = True
+                dgs_on_prop_update_on_render['sna_dgs_proxies_in_scene'] = True
         for i_1DC66 in range(len(bpy.context.scene.objects)):
             if (property_exists("bpy.context.scene.objects[i_1DC66].modifiers", globals(), locals()) and 'KIRI_3DGS_Render_GN' in bpy.context.scene.objects[i_1DC66].modifiers):
                 bpy.context.scene.objects[i_1DC66].hide_viewport = False
-        if dgs_render_modeon_property_update['sna_dgs_proxies_in_scene']:
-            sna_c2_refresh_all_4D367(True, bpy.context.scene.sna_dgs_scene_properties.r2_transforms, True)
-            sna_shader_system_A4AED()
-            sna_texture_creation_FD1B2()
-            sna_viewport_render_A3941()
-        bpy.context.view_layer.objects.active = None
-        for i_611D3 in range(len(bpy.context.scene.objects)):
-            if ((property_exists("bpy.context.scene.objects[i_611D3].modifiers", globals(), locals()) and 'KIRI_3DGS_Render_GN' in bpy.context.scene.objects[i_611D3].modifiers) and '3DGS_Mesh_Type' in bpy.context.scene.objects[i_611D3]):
-                if (bpy.context.scene.objects[i_611D3]['3DGS_Mesh_Type'] == 'face'):
-                    bpy.context.scene.objects[i_611D3].hide_viewport = True
+        if dgs_on_prop_update_on_render['sna_dgs_proxies_in_scene']:
+            if bpy.context.scene.sna_dgs_scene_properties.r2_render_rig_cache_mode == "None":
+                sna_c2_refresh_all_4D367(True, bpy.context.scene.sna_dgs_scene_properties.r2_transforms, True)
+                sna_shader_system_A4AED()
+                sna_texture_creation_FD1B2()
+                sna_viewport_render_A3941(bpy.context.scene.sna_dgs_scene_properties.r2_sh_degree, bpy.context.scene.sna_dgs_scene_properties.r2_sort_threshold)
+            elif bpy.context.scene.sna_dgs_scene_properties.r2_render_rig_cache_mode == "Enabled Baked":
+                sna_rig_5_apply_baked_cache_5656F('All Bound', None)
+                sna_clean_up_scene_5F1F1(False)
+                sna_shader_system_A4AED()
+                sna_texture_creation_FD1B2()
+                sna_viewport_render_A3941(bpy.context.scene.sna_dgs_scene_properties.r2_sh_degree, bpy.context.scene.sna_dgs_scene_properties.r2_sort_threshold)
+            else:
+                pass
     elif sna_updated_prop == "Mesh 2 3DGS":
         sna_clean_up_scene_5F1F1(False)
         bpy.context.view_layer.objects.active = None
@@ -202,11 +209,22 @@ def property_exists(prop_path, glob, loc):
         return False
 
 
-class SNA_OT_Dgs_Render_Launch_Kiri_Site_Bf973(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_launch_kiri_site_bf973"
-    bl_label = "3DGS Render: Launch KIRI Site"
-    bl_description = "Launches a browser for the KIRI Engine main site"
+def load_preview_icon(path):
+    global _icons
+    if not path in _icons:
+        if os.path.exists(path):
+            _icons.load(path, path, "IMAGE")
+        else:
+            return 0
+    return _icons[path].icon_id
+
+
+class SNA_OT_Dgs_Render_Launch_Site_Bf973(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_launch_site_bf973"
+    bl_label = "3DGS Render: Launch Site"
+    bl_description = "Launches a web browser"
     bl_options = {"REGISTER", "UNDO"}
+    sna_site_address: bpy.props.StringProperty(name='Site Address', description='', default='', subtype='NONE', maxlen=0)
 
     @classmethod
     def poll(cls, context):
@@ -215,30 +233,7 @@ class SNA_OT_Dgs_Render_Launch_Kiri_Site_Bf973(bpy.types.Operator):
         return not False
 
     def execute(self, context):
-        url = 'https://www.kiriengine.app/'
-        # Open the web browser and go to the specified URL
-        webbrowser.open(url)
-        print(f"Opening web browser to {url}")
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
-
-
-class SNA_OT_Dgs_Render_Launch_Superhive_Store_08F23(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_launch_superhive_store_08f23"
-    bl_label = "3DGS Render: Launch SuperHive Store"
-    bl_description = "Launches a browser for the KIRI Engine SuperHive store"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        url = 'https://blendermarket.com/creators/blender-addon-from-kiri-engine'
+        url = self.sna_site_address
         # Open the web browser and go to the specified URL
         webbrowser.open(url)
         print(f"Opening web browser to {url}")
@@ -281,7 +276,8 @@ def sna_about_kiri_links_docs_3dgs_D02EC(layout_function, ):
     if not True: box_D36BE.operator_context = "EXEC_DEFAULT"
     box_D36BE.label(text='About KIRI Engine', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')))
     box_D36BE.template_icon(icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'Addon speel 2.png')), scale=10.0)
-    op = box_D36BE.operator('sna.dgs_render_launch_kiri_site_bf973', text='Learn More', icon_value=0, emboss=True, depress=False)
+    op = box_D36BE.operator('sna.dgs_render_launch_site_bf973', text='Learn More', icon_value=0, emboss=True, depress=False)
+    op.sna_site_address = 'https://www.kiriengine.app/'
     box_28D7F = col_CB7BF.box()
     box_28D7F.alert = False
     box_28D7F.enabled = True
@@ -292,18 +288,18 @@ def sna_about_kiri_links_docs_3dgs_D02EC(layout_function, ):
     box_28D7F.scale_x = 1.0
     box_28D7F.scale_y = 1.2000000476837158
     if not True: box_28D7F.operator_context = "EXEC_DEFAULT"
-    split_F339F = box_28D7F.split(factor=0.30000001192092896, align=False)
-    split_F339F.alert = False
-    split_F339F.enabled = True
-    split_F339F.active = True
-    split_F339F.use_property_split = False
-    split_F339F.use_property_decorate = False
-    split_F339F.scale_x = 1.0
-    split_F339F.scale_y = 1.0
-    split_F339F.alignment = 'Expand'.upper()
-    if not True: split_F339F.operator_context = "EXEC_DEFAULT"
-    split_F339F.prop(bpy.context.scene.sna_dgs_scene_properties, 'show_tips', text='Tips', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')), emboss=True)
-    row_273F5 = split_F339F.row(heading='', align=False)
+    split_06A78 = box_28D7F.split(factor=0.5, align=False)
+    split_06A78.alert = False
+    split_06A78.enabled = True
+    split_06A78.active = True
+    split_06A78.use_property_split = False
+    split_06A78.use_property_decorate = False
+    split_06A78.scale_x = 1.0
+    split_06A78.scale_y = 1.0
+    split_06A78.alignment = 'Expand'.upper()
+    if not True: split_06A78.operator_context = "EXEC_DEFAULT"
+    split_06A78.label(text='Documentation', icon_value=0)
+    row_273F5 = split_06A78.row(heading='', align=False)
     row_273F5.alert = False
     row_273F5.enabled = True
     row_273F5.active = True
@@ -313,8 +309,10 @@ def sna_about_kiri_links_docs_3dgs_D02EC(layout_function, ):
     row_273F5.scale_y = 1.0
     row_273F5.alignment = 'Right'.upper()
     row_273F5.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
-    op = row_273F5.operator('sna.dgs_render_open_documentation_3a04f', text='Documentation', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'documentation.svg')), emboss=True, depress=False)
-    op = row_273F5.operator('sna.dgs_render_open_tutorial_video_0684a', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'video.svg')), emboss=True, depress=False)
+    op = row_273F5.operator('sna.dgs_render_launch_site_bf973', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'documentation.svg')), emboss=True, depress=False)
+    op.sna_site_address = 'https://www.kiriengine.app/blender-addon/3dgs-render'
+    op = row_273F5.operator('sna.dgs_render_launch_site_bf973', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'video.svg')), emboss=True, depress=False)
+    op.sna_site_address = 'https://www.youtube.com/@BlenderAddon-fromKIRI'
     box_DE3AB = col_CB7BF.box()
     box_DE3AB.alert = False
     box_DE3AB.enabled = True
@@ -346,77 +344,10 @@ def sna_about_kiri_links_docs_3dgs_D02EC(layout_function, ):
     split_649B4.scale_y = 1.0
     split_649B4.alignment = 'Expand'.upper()
     if not True: split_649B4.operator_context = "EXEC_DEFAULT"
-    op = split_649B4.operator('sna.dgs_render_launch_superhive_store_08f23', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'SuperHive Logo White.png')), emboss=True, depress=False)
-    op = split_649B4.operator('sna.dgs_render_launch_kiri_blender_addons_page_9d58c', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'kiriengine blender addon icon color.svg')), emboss=True, depress=False)
-
-
-class SNA_OT_Dgs_Render_Launch_Kiri_Blender_Addons_Page_9D58C(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_launch_kiri_blender_addons_page_9d58c"
-    bl_label = "3DGS Render: Launch KIRI Blender Addons page"
-    bl_description = "Launches a browser for the KIRI Engine Blender Market store"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        url = 'https://www.kiriengine.app/blender-addon'
-        # Open the web browser and go to the specified URL
-        webbrowser.open(url)
-        print(f"Opening web browser to {url}")
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
-
-
-class SNA_OT_Dgs_Render_Open_Documentation_3A04F(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_open_documentation_3a04f"
-    bl_label = "3DGS Render: Open Documentation"
-    bl_description = "Launches a browser with the addon documentation"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        url = 'https://www.kiriengine.app/blender-addon/3dgs-render'
-        # Open the web browser and go to the specified URL
-        webbrowser.open(url)
-        print(f"Opening web browser to {url}")
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
-
-
-class SNA_OT_Dgs_Render_Open_Tutorial_Video_0684A(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_open_tutorial_video_0684a"
-    bl_label = "3DGS Render: Open Tutorial Video"
-    bl_description = "Launches a browser with the addon documentation video"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        url = 'https://www.youtube.com/@BlenderAddon-fromKIRI'
-        # Open the web browser and go to the specified URL
-        webbrowser.open(url)
-        print(f"Opening web browser to {url}")
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
+    op = split_649B4.operator('sna.dgs_render_launch_site_bf973', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'SuperHive Logo White.png')), emboss=True, depress=False)
+    op.sna_site_address = 'https://blendermarket.com/creators/blender-addon-from-kiri-engine'
+    op = split_649B4.operator('sna.dgs_render_launch_site_bf973', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'kiriengine blender addon icon color.svg')), emboss=True, depress=False)
+    op.sna_site_address = 'https://www.kiriengine.app/blender-addon'
 
 
 def sna_active_3dgs_mesh_object_menu_9588F(layout_function, ):
@@ -462,7 +393,17 @@ def sna_active_3dgs_mesh_object_menu_9588F(layout_function, ):
         col_247F1.alignment = 'Expand'.upper()
         col_247F1.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
         col_247F1.label(text='Active 3DGS Mesh Object:', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')))
-        box_29E44 = col_247F1.box()
+        row_0AD6D = col_A4D20.row(heading='', align=True)
+        row_0AD6D.alert = False
+        row_0AD6D.enabled = True
+        row_0AD6D.active = True
+        row_0AD6D.use_property_split = False
+        row_0AD6D.use_property_decorate = False
+        row_0AD6D.scale_x = 1.0
+        row_0AD6D.scale_y = 1.0
+        row_0AD6D.alignment = 'Expand'.upper()
+        row_0AD6D.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+        box_29E44 = row_0AD6D.box()
         box_29E44.alert = False
         box_29E44.enabled = True
         box_29E44.active = True
@@ -473,20 +414,19 @@ def sna_active_3dgs_mesh_object_menu_9588F(layout_function, ):
         box_29E44.scale_y = 1.0
         if not True: box_29E44.operator_context = "EXEC_DEFAULT"
         box_29E44.label(text=bpy.context.view_layer.objects.active.name, icon_value=0)
-        col_A4D20.separator(factor=1.0)
-        col_F0A3B = col_A4D20.column(heading='', align=False)
+        col_F0A3B = row_0AD6D.column(heading='', align=False)
         col_F0A3B.alert = (bpy.context.view_layer.objects.active.sna_dgs_object_properties.update_mode == 'Disable Camera Updates')
         col_F0A3B.enabled = True
         col_F0A3B.active = True
         col_F0A3B.use_property_split = False
         col_F0A3B.use_property_decorate = False
         col_F0A3B.scale_x = 1.0
-        col_F0A3B.scale_y = 1.0
+        col_F0A3B.scale_y = 1.5
         col_F0A3B.alignment = 'Expand'.upper()
         col_F0A3B.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
         col_F0A3B.prop(bpy.context.view_layer.objects.active.sna_dgs_object_properties, 'update_mode', text='', icon_value=0, emboss=True, toggle=True)
         col_A4D20.separator(factor=1.0)
-        if ((bpy.context.view_layer.objects.active.sna_dgs_object_properties.update_mode == 'Enable Camera Updates') and (not bpy.context.view_layer.objects.active.sna_dgs_object_properties.cam_update)):
+        if (bpy.context.view_layer.objects.active.sna_dgs_object_properties.update_mode == 'Enable Camera Updates'):
             if 'EDIT_MESH'==bpy.context.mode:
                 if '3DGS_Mesh_Type' in bpy.context.view_layer.objects.active:
                     if (bpy.context.view_layer.objects.active['3DGS_Mesh_Type'] == 'vert'):
@@ -502,7 +442,7 @@ def sna_active_3dgs_mesh_object_menu_9588F(layout_function, ):
                         box_96194.scale_x = 1.0
                         box_96194.scale_y = 1.0
                         if not True: box_96194.operator_context = "EXEC_DEFAULT"
-                        row_A3F2D = box_96194.row(heading='', align=False)
+                        row_A3F2D = box_96194.row(heading='', align=True)
                         row_A3F2D.alert = False
                         row_A3F2D.enabled = True
                         row_A3F2D.active = True
@@ -526,7 +466,7 @@ def sna_active_3dgs_mesh_object_menu_9588F(layout_function, ):
                 box_1444A.scale_x = 1.0
                 box_1444A.scale_y = 1.0
                 if not True: box_1444A.operator_context = "EXEC_DEFAULT"
-                op = box_1444A.operator('sna.dgs_render_align_active_to_view_30b13', text='Update Active To View', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'eye.svg')), emboss=True, depress=False)
+                op = box_1444A.operator('sna.dgs_render_align_active_to_view_30b13', text=('Refresh update to camera' if ((bpy.context.scene.camera != None) and bpy.context.view_layer.objects.active.sna_dgs_object_properties.cam_update) else 'Update Active To View'), icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'eye.svg')), emboss=True, depress=False)
         if (bpy.context.view_layer.objects.active.sna_dgs_object_properties.update_mode == 'Show As Point Cloud'):
             box_AA375 = col_A4D20.box()
             box_AA375.alert = False
@@ -542,18 +482,18 @@ def sna_active_3dgs_mesh_object_menu_9588F(layout_function, ):
             box_AA375.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN'], attr_C8F44, text='Point Radius', icon_value=0, emboss=True)
             box_AA375.prop_search(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN'], '["Socket_61"]', bpy.data, 'materials', text='Material', icon='NONE', item_search_property="name")
         if (bpy.context.view_layer.objects.active.sna_dgs_object_properties.update_mode == 'Enable Camera Updates'):
-            box_DC5A2 = col_A4D20.box()
-            box_DC5A2.alert = bpy.context.view_layer.objects.active.sna_dgs_object_properties.cam_update
-            box_DC5A2.enabled = True
-            box_DC5A2.active = True
-            box_DC5A2.use_property_split = False
-            box_DC5A2.use_property_decorate = False
-            box_DC5A2.alignment = 'Expand'.upper()
-            box_DC5A2.scale_x = 1.0
-            box_DC5A2.scale_y = 1.0
-            if not True: box_DC5A2.operator_context = "EXEC_DEFAULT"
+            col_75D68 = col_A4D20.column(heading='', align=False)
+            col_75D68.alert = False
+            col_75D68.enabled = True
+            col_75D68.active = True
+            col_75D68.use_property_split = False
+            col_75D68.use_property_decorate = False
+            col_75D68.scale_x = 1.0
+            col_75D68.scale_y = 1.0
+            col_75D68.alignment = 'Expand'.upper()
+            col_75D68.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
             if ((bpy.context.scene.camera == None) and bpy.context.view_layer.objects.active.sna_dgs_object_properties.cam_update):
-                box_A3A41 = box_DC5A2.box()
+                box_A3A41 = col_75D68.box()
                 box_A3A41.alert = False
                 box_A3A41.enabled = True
                 box_A3A41.active = True
@@ -563,8 +503,106 @@ def sna_active_3dgs_mesh_object_menu_9588F(layout_function, ):
                 box_A3A41.scale_x = 1.0
                 box_A3A41.scale_y = 1.0
                 if not True: box_A3A41.operator_context = "EXEC_DEFAULT"
-                box_A3A41.label(text='No Active Camera Found', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
-            box_DC5A2.prop(bpy.context.view_layer.objects.active.sna_dgs_object_properties, 'cam_update', text='Use Active Camera', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'camera.svg')), emboss=True, toggle=True)
+                box_A3A41.label(text='No Active Camera Found', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+            box_21A87 = col_75D68.box()
+            box_21A87.alert = bpy.context.view_layer.objects.active.sna_dgs_object_properties.cam_update
+            box_21A87.enabled = True
+            box_21A87.active = True
+            box_21A87.use_property_split = False
+            box_21A87.use_property_decorate = False
+            box_21A87.alignment = 'Expand'.upper()
+            box_21A87.scale_x = 1.0
+            box_21A87.scale_y = 1.5
+            if not True: box_21A87.operator_context = "EXEC_DEFAULT"
+            box_21A87.prop(bpy.context.view_layer.objects.active.sna_dgs_object_properties, 'cam_update', text='Use Active Camera', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'camera.svg')), emboss=True, toggle=True)
+            if (bpy.context.view_layer.objects.active.sna_dgs_object_properties.cam_update and (bpy.context.scene.camera != None) and property_exists("bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN']['Socket_68']", globals(), locals()) and property_exists("None", globals(), locals())):
+                col_C389F = col_75D68.column(heading='', align=True)
+                col_C389F.alert = False
+                col_C389F.enabled = True
+                col_C389F.active = True
+                col_C389F.use_property_split = False
+                col_C389F.use_property_decorate = False
+                col_C389F.scale_x = 1.0
+                col_C389F.scale_y = 1.0
+                col_C389F.alignment = 'Expand'.upper()
+                col_C389F.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                box_81D6E = col_C389F.box()
+                box_81D6E.alert = False
+                box_81D6E.enabled = True
+                box_81D6E.active = True
+                box_81D6E.use_property_split = False
+                box_81D6E.use_property_decorate = False
+                box_81D6E.alignment = 'Expand'.upper()
+                box_81D6E.scale_x = 1.0
+                box_81D6E.scale_y = 1.0
+                if not True: box_81D6E.operator_context = "EXEC_DEFAULT"
+                row_BAB68 = box_81D6E.row(heading='', align=False)
+                row_BAB68.alert = False
+                row_BAB68.enabled = True
+                row_BAB68.active = True
+                row_BAB68.use_property_split = False
+                row_BAB68.use_property_decorate = False
+                row_BAB68.scale_x = 1.0
+                row_BAB68.scale_y = 1.0
+                row_BAB68.alignment = 'Expand'.upper()
+                row_BAB68.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                attr_47247 = '["' + str('Socket_68' + '"]') 
+                row_BAB68.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN'], attr_47247, text='Frustrum Cull (Edit Mode)', icon_value=0, emboss=True)
+                if bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN']['Socket_68']:
+                    split_06E70 = row_BAB68.split(factor=0.30000001192092896, align=False)
+                    split_06E70.alert = False
+                    split_06E70.enabled = True
+                    split_06E70.active = True
+                    split_06E70.use_property_split = False
+                    split_06E70.use_property_decorate = False
+                    split_06E70.scale_x = 1.0
+                    split_06E70.scale_y = 1.0
+                    split_06E70.alignment = 'Expand'.upper()
+                    if not True: split_06E70.operator_context = "EXEC_DEFAULT"
+                    attr_F00D7 = '["' + str('Socket_74' + '"]') 
+                    split_06E70.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN'], attr_F00D7, text='Invert', icon_value=0, emboss=True)
+                    attr_D8000 = '["' + str('Socket_63' + '"]') 
+                    split_06E70.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN'], attr_D8000, text='Padding', icon_value=0, emboss=True)
+                box_D224C = col_C389F.box()
+                box_D224C.alert = False
+                box_D224C.enabled = True
+                box_D224C.active = True
+                box_D224C.use_property_split = False
+                box_D224C.use_property_decorate = False
+                box_D224C.alignment = 'Expand'.upper()
+                box_D224C.scale_x = 1.0
+                box_D224C.scale_y = 1.0
+                if not True: box_D224C.operator_context = "EXEC_DEFAULT"
+                row_03A56 = box_D224C.row(heading='', align=False)
+                row_03A56.alert = False
+                row_03A56.enabled = True
+                row_03A56.active = True
+                row_03A56.use_property_split = False
+                row_03A56.use_property_decorate = False
+                row_03A56.scale_x = 1.0
+                row_03A56.scale_y = 1.0
+                row_03A56.alignment = 'Expand'.upper()
+                row_03A56.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                attr_12DA6 = '["' + str('Socket_69' + '"]') 
+                row_03A56.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN'], attr_12DA6, text='Distance Cull (Edit Mode)', icon_value=0, emboss=True)
+                if bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN']['Socket_69']:
+                    attr_29452 = '["' + str('Socket_72' + '"]') 
+                    row_03A56.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN'], attr_29452, text='Use Camera Clip Range', icon_value=0, emboss=True)
+                if ( not bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN']['Socket_72'] and bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN']['Socket_69']):
+                    row_050CC = box_D224C.row(heading='', align=False)
+                    row_050CC.alert = False
+                    row_050CC.enabled = True
+                    row_050CC.active = True
+                    row_050CC.use_property_split = False
+                    row_050CC.use_property_decorate = False
+                    row_050CC.scale_x = 1.0
+                    row_050CC.scale_y = 1.0
+                    row_050CC.alignment = 'Expand'.upper()
+                    row_050CC.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                    attr_47D5F = '["' + str('Socket_70' + '"]') 
+                    row_050CC.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN'], attr_47D5F, text='Near Distance', icon_value=0, emboss=True)
+                    attr_05FB6 = '["' + str('Socket_71' + '"]') 
+                    row_050CC.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN'], attr_05FB6, text='Far Distance', icon_value=0, emboss=True)
 
 
 class SNA_OT_Dgs_Render_Align_Active_To_X_Axis_6Ae0E(bpy.types.Operator):
@@ -722,18 +760,8 @@ class SNA_OT_Dgs_Render_Align_Active_To_View_30B13(bpy.types.Operator):
 
 
 def sna_animate_function_interface_57F9E(layout_function, ):
-    box_DFEF6 = layout_function.box()
-    box_DFEF6.alert = False
-    box_DFEF6.enabled = True
-    box_DFEF6.active = True
-    box_DFEF6.use_property_split = False
-    box_DFEF6.use_property_decorate = False
-    box_DFEF6.alignment = 'Expand'.upper()
-    box_DFEF6.scale_x = 1.0
-    box_DFEF6.scale_y = 1.0
-    if not True: box_DFEF6.operator_context = "EXEC_DEFAULT"
-    op = box_DFEF6.operator('sna.dgs_render_append_wire_sphere_2bf63', text='Add Wire Sphere', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'noun-sphere-7915480-FFFFFF.svg')), emboss=True, depress=False)
-    op = box_DFEF6.operator('sna.dgs_render_append_wire_cube_56e0f', text='Add Wire Cube', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'noun-cube-7915485-FFFFFF.svg')), emboss=True, depress=False)
+    layout_function = layout_function
+    sna_append_wire_primitives_15D73(layout_function, )
     if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Animate_GN' in bpy.context.view_layer.objects.active.modifiers):
         box_1DAB6 = layout_function.box()
         box_1DAB6.alert = False
@@ -768,7 +796,9 @@ def sna_animate_function_interface_57F9E(layout_function, ):
         row_058B1.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
         row_058B1.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Animate_GN'], 'show_render', text='', icon_value=0, emboss=True, toggle=True)
         op = row_058B1.operator('sna.dgs_render_apply_animate_modifier_3938e', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'check.svg')), emboss=True, depress=False)
-        op = row_058B1.operator('sna.dgs_render_remove_animate_modifier_5b34d', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'trash.svg')), emboss=True, depress=False)
+        op = row_058B1.operator('sna.dgs_render_remove_modifier_9cf0d', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'trash.svg')), emboss=True, depress=False)
+        op.sna_target_object = bpy.context.view_layer.objects.active.name
+        op.sna_target_modifier = 'KIRI_3DGS_Animate_GN'
         col_03A93 = box_1DAB6.column(heading='', align=False)
         col_03A93.alert = False
         col_03A93.enabled = True
@@ -1011,28 +1041,8 @@ def sna_animate_function_interface_57F9E(layout_function, ):
         row_07DA9.scale_y = 1.0
         row_07DA9.alignment = 'Expand'.upper()
         row_07DA9.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
-        row_07DA9.label(text='Animate Modifier Is Missing', icon_value=0)
+        row_07DA9.label(text='Animate', icon_value=0)
         op = row_07DA9.operator('sna.dgs_render_add_animate_modifier_39c55', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'plus-circle.svg')), emboss=True, depress=False)
-
-
-class SNA_OT_Dgs_Render_Remove_Animate_Modifier_5B34D(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_remove_animate_modifier_5b34d"
-    bl_label = "3DGS Render: Remove Animate Modifier"
-    bl_description = "Removes the named modifier"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        bpy.context.view_layer.objects.active.modifiers.remove(modifier=bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Animate_GN'], )
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
 
 
 class SNA_OT_Dgs_Render_Apply_Animate_Modifier_3938E(bpy.types.Operator):
@@ -1055,18 +1065,36 @@ class SNA_OT_Dgs_Render_Apply_Animate_Modifier_3938E(bpy.types.Operator):
                 a.tag_redraw()
         object_name = bpy.context.view_layer.objects.active.name
         modifier_name = 'KIRI_3DGS_Animate_GN'
+        #import bpy
+        # --- VARIABLES ---
+        # Replace these with your Serpens inputs or variables
+        #object_name = "Cube"      # The name of the object you want to affect
+        #modifier_name = "Bevel"   # The name of the modifier to apply/remove
+        # --- SCRIPT START ---
         obj = bpy.data.objects.get(object_name)
         if obj:
             modifier = obj.modifiers.get(modifier_name)
             if modifier:
                 if not modifier.show_viewport:
-                    # Simply remove the modifier if it's hidden
+                    # Case 1: Modifier is hidden in viewport -> Remove it directly
+                    # This works because .remove() is a data operation, not an operator.
                     obj.modifiers.remove(modifier)
-                    print(f"Removed hidden modifier '{modifier_name}' from object '{object_name}'.")
+                    print(f"Removed hidden modifier '{modifier_name}' from '{object_name}'.")
                 else:
-                    # Apply normally if visible
-                    bpy.ops.object.modifier_apply(modifier=modifier_name)
-                    print(f"Applied visible modifier '{modifier_name}' to object '{object_name}'.")
+                    # Case 2: Modifier is visible -> Apply it using an Operator
+                    # CONTEXT OVERRIDE EXPLANATION:
+                    # bpy.ops usually runs on whatever is selected in the 3D View.
+                    # 'temp_override' creates a temporary, isolated environment where 
+                    # Blender believes 'obj' is the Active Object, regardless of what 
+                    # you actually have selected. 
+                    try:
+                        # We force the 'object' and 'active_object' context members to be our specific obj
+                        with bpy.context.temp_override(object=obj, active_object=obj):
+                            # Inside this block, the operator thinks 'obj' is the active selection
+                            bpy.ops.object.modifier_apply(modifier=modifier_name)
+                        print(f"Applied visible modifier '{modifier_name}' to '{object_name}'.")
+                    except Exception as e:
+                        print(f"Could not apply modifier. Error: {e}")
             else:
                 print(f"Modifier '{modifier_name}' not found on object '{object_name}'.")
         else:
@@ -1093,7 +1121,7 @@ class SNA_OT_Dgs_Render_Add_Animate_Modifier_39C55(bpy.types.Operator):
         if (bpy.context.view_layer.objects.active.type == 'MESH' or bpy.context.view_layer.objects.active.type == 'CURVE'):
             created_modifier_0_3280f = sna_append_and_add_geo_nodes_function_execute_6BCD7('KIRI_3DGS_Animate_GN', 'KIRI_3DGS_Animate_GN', bpy.context.view_layer.objects.active)
             if (len(bpy.context.view_layer.objects.active.modifiers) > 0):
-                pass
+                sna_move_modifier_index_23126(bpy.context.view_layer.objects.active, 'KIRI_3DGS_Animate_GN', int(len(bpy.context.view_layer.objects.active.modifiers) - 4.0))
         else:
             self.report({'INFO'}, message='The Active Object is not a mesh or curve object.')
         return {"FINISHED"}
@@ -1102,16 +1130,543 @@ class SNA_OT_Dgs_Render_Add_Animate_Modifier_39C55(bpy.types.Operator):
         return self.execute(context)
 
 
-def sna_add_to_view3d_mt_object_apply_F9005(self, context):
+def sna_add_to_view3d_mt_object_apply_4C860(self, context):
     if not (False):
         layout = self.layout
-        op = layout.operator('sna.dgs_render_apply_3dgs_tranforms_5b665', text='Apply 3DGS Transforms and Colour', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'kiriengine icon.svg')), emboss=True, depress=False)
+        if '3DGS_Mesh_Type' in bpy.context.view_layer.objects.active:
+            col_B3C28 = layout.column(heading='', align=False)
+            col_B3C28.alert = False
+            col_B3C28.enabled = True
+            col_B3C28.active = True
+            col_B3C28.use_property_split = False
+            col_B3C28.use_property_decorate = False
+            col_B3C28.scale_x = 1.0
+            col_B3C28.scale_y = 1.0
+            col_B3C28.alignment = 'Expand'.upper()
+            col_B3C28.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+            op = col_B3C28.operator('sna.dgs_render_apply_3dgs_tranforms_5b665', text='Apply 3DGS Transforms', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')), emboss=True, depress=False)
+            op.sna_apply_location = False
+            if bpy.context.view_layer.objects.active['3DGS_Mesh_Type'] == "face":
+                op = col_B3C28.operator('sna.dgs_render_convert_face_3dgs_to_vert_3dgs_fc49c', text='Convert Face 3DGS to Vert 3DGS', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')), emboss=True, depress=False)
+            elif bpy.context.view_layer.objects.active['3DGS_Mesh_Type'] == "vert":
+                op = col_B3C28.operator('sna.dgs_render_convert_vert_3dgs_to_face_3dgs_e6635', text='Convert Vert 3DGS to Face 3DGS', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')), emboss=True, depress=False)
+            else:
+                pass
 
 
 class SNA_OT_Dgs_Render_Apply_3Dgs_Tranforms_5B665(bpy.types.Operator):
     bl_idname = "sna.dgs_render_apply_3dgs_tranforms_5b665"
     bl_label = "3DGS Render: Apply 3DGS Tranforms"
-    bl_description = "Applies the 3DGS Render modifier if present, makes colour edits permanent and updates 3DGS rotation and scale values"
+    bl_description = "Applies rotation and scale transforms and updates 3DGS Attributes"
+    bl_options = {"REGISTER", "UNDO"}
+    sna_apply_location: bpy.props.BoolProperty(name='Apply location', description='', options={'HIDDEN'}, default=False)
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        target_obj_name = bpy.context.view_layer.objects.active.name
+        import numpy as np
+        #target_obj_name = ""  # Input: name of the mesh 3DGS object to process
+        SCALE_ATTRIBUTES = ("scale_0", "scale_1", "scale_2")
+        ROTATION_ATTRIBUTES = ("rot_0", "rot_1", "rot_2", "rot_3")
+        DC_ATTRIBUTES = ("f_dc_0", "f_dc_1", "f_dc_2")
+        SUPPORTED_SH_COEFFS = {1: 0, 4: 1, 9: 2, 16: 3}
+        SH_C0 = 0.28209479177387814
+        SH_C1 = 0.4886025119029199
+        SH_C2_0 = 1.0925484305920792
+        SH_C2_1 = -1.0925484305920792
+        SH_C2_2 = 0.31539156525252005
+        SH_C2_3 = -1.0925484305920792
+        SH_C2_4 = 0.5462742152960396
+        SH_C3_0 = -0.5900435899266435
+        SH_C3_1 = 2.890611442640554
+        SH_C3_2 = -0.4570457994644658
+        SH_C3_3 = 0.3731763325901154
+        SH_C3_4 = -0.4570457994644658
+        SH_C3_5 = 1.445305721320277
+        SH_C3_6 = -0.5900435899266435
+
+        def get_target_mesh_object(obj_name):
+            obj_name = str(obj_name).strip()
+            if not obj_name:
+                raise ValueError("target_obj_name is empty. Provide the mesh object name to process.")
+            obj = bpy.data.objects.get(obj_name)
+            if not obj:
+                raise ValueError(f"Object '{obj_name}' was not found.")
+            if obj.type != "MESH":
+                raise ValueError(f"Object '{obj.name}' is not a mesh.")
+            if not hasattr(obj.data, "attributes"):
+                raise ValueError(f"Object '{obj.name}' does not have attribute data.")
+            return obj
+
+        def get_float_attribute(obj, attr_name):
+            if attr_name not in obj.data.attributes:
+                raise ValueError(f"Attribute '{attr_name}' not found on object '{obj.name}'.")
+            attr = obj.data.attributes[attr_name]
+            if attr.data_type != "FLOAT":
+                raise ValueError(
+                    f"Attribute '{attr_name}' must be FLOAT, found {attr.data_type}."
+                )
+            values = np.empty(len(attr.data), dtype=np.float32)
+            attr.data.foreach_get("value", values)
+            return attr, values
+
+        def get_face_quad_vertex_groups(mesh_data):
+            """Return one disconnected 4-vertex group per quad face for face-based gaussian meshes."""
+            num_polygons = len(mesh_data.polygons)
+            if num_polygons == 0:
+                return None
+            face_vertex_indices = np.empty((num_polygons, 4), dtype=np.int32)
+            for poly_index, poly in enumerate(mesh_data.polygons):
+                poly_vertices = tuple(poly.vertices)
+                if len(poly_vertices) != 4:
+                    return None
+                face_vertex_indices[poly_index] = poly_vertices
+            if np.unique(face_vertex_indices).size != len(mesh_data.vertices):
+                return None
+            return face_vertex_indices
+
+        def collapse_attribute_values(data_array, face_vertex_indices, expected_vertex_count, attr_name):
+            """Collapse per-vertex data to one logical value per disconnected quad when needed."""
+            if face_vertex_indices is None:
+                return data_array.astype(np.float64)
+            if len(data_array) == expected_vertex_count:
+                return data_array[face_vertex_indices].mean(axis=1).astype(np.float64)
+            if len(data_array) == len(face_vertex_indices):
+                return data_array.astype(np.float64)
+            raise ValueError(
+                f"Attribute '{attr_name}' has {len(data_array)} values, expected {expected_vertex_count} vertices "
+                f"or {len(face_vertex_indices)} face islands."
+            )
+
+        def expand_attribute_values(logical_values, raw_length, face_vertex_indices, expected_vertex_count, attr_name):
+            """Expand logical splat values back to the attribute storage domain."""
+            logical_values = np.asarray(logical_values, dtype=np.float64)
+            if face_vertex_indices is None:
+                if len(logical_values) != raw_length:
+                    raise ValueError(
+                        f"Attribute '{attr_name}' expects {raw_length} values, got {len(logical_values)}."
+                    )
+                return logical_values.astype(np.float32)
+            if raw_length == len(face_vertex_indices):
+                if len(logical_values) != len(face_vertex_indices):
+                    raise ValueError(
+                        f"Attribute '{attr_name}' expects {len(face_vertex_indices)} logical values, got {len(logical_values)}."
+                    )
+                return logical_values.astype(np.float32)
+            if raw_length == expected_vertex_count:
+                if len(logical_values) != len(face_vertex_indices):
+                    raise ValueError(
+                        f"Attribute '{attr_name}' expects {len(face_vertex_indices)} logical values for face expansion, "
+                        f"got {len(logical_values)}."
+                    )
+                expanded = np.empty(expected_vertex_count, dtype=np.float64)
+                expanded[face_vertex_indices] = logical_values[:, None]
+                return expanded.astype(np.float32)
+            raise ValueError(
+                f"Attribute '{attr_name}' has unsupported storage length {raw_length} for face-based expansion."
+            )
+
+        def get_float_attribute_context(obj, attr_name, face_vertex_indices=None, expected_vertex_count=None):
+            attr, raw_values = get_float_attribute(obj, attr_name)
+            if expected_vertex_count is None:
+                expected_vertex_count = len(obj.data.vertices)
+            logical_values = collapse_attribute_values(
+                raw_values,
+                face_vertex_indices,
+                expected_vertex_count,
+                attr_name,
+            )
+            return {
+                "attr": attr,
+                "attr_name": attr_name,
+                "raw_length": len(raw_values),
+                "logical_values": logical_values,
+            }
+
+        def set_attribute_context_values(context, logical_values, face_vertex_indices=None, expected_vertex_count=None):
+            if expected_vertex_count is None:
+                raise ValueError("expected_vertex_count is required when writing attribute values.")
+            values = expand_attribute_values(
+                logical_values,
+                context["raw_length"],
+                face_vertex_indices,
+                expected_vertex_count,
+                context["attr_name"],
+            )
+            context["attr"].data.foreach_set("value", values)
+
+        def get_rotation_attribute_data(obj, face_vertex_indices=None, expected_vertex_count=None):
+            attrs = []
+            values = []
+            for attr_name in ROTATION_ATTRIBUTES:
+                attr_context = get_float_attribute_context(
+                    obj,
+                    attr_name,
+                    face_vertex_indices=face_vertex_indices,
+                    expected_vertex_count=expected_vertex_count,
+                )
+                attrs.append(attr_context)
+                values.append(attr_context["logical_values"])
+            quaternions = np.stack(values, axis=1)
+            norms = np.linalg.norm(quaternions, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-12)
+            quaternions /= norms
+            return attrs, quaternions
+
+        def get_scale_attribute_data(obj, face_vertex_indices=None, expected_vertex_count=None):
+            attrs = []
+            values = []
+            for attr_name in SCALE_ATTRIBUTES:
+                attr_context = get_float_attribute_context(
+                    obj,
+                    attr_name,
+                    face_vertex_indices=face_vertex_indices,
+                    expected_vertex_count=expected_vertex_count,
+                )
+                attrs.append(attr_context)
+                values.append(attr_context["logical_values"])
+            log_scales = np.stack(values, axis=1)
+            return attrs, log_scales
+
+        def quaternions_to_rotation_matrices(quaternions):
+            w = quaternions[:, 0]
+            x = quaternions[:, 1]
+            y = quaternions[:, 2]
+            z = quaternions[:, 3]
+            xx = x * x
+            yy = y * y
+            zz = z * z
+            xy = x * y
+            xz = x * z
+            yz = y * z
+            wx = w * x
+            wy = w * y
+            wz = w * z
+            matrices = np.empty((len(quaternions), 3, 3), dtype=np.float64)
+            matrices[:, 0, 0] = 1.0 - 2.0 * (yy + zz)
+            matrices[:, 0, 1] = 2.0 * (xy - wz)
+            matrices[:, 0, 2] = 2.0 * (xz + wy)
+            matrices[:, 1, 0] = 2.0 * (xy + wz)
+            matrices[:, 1, 1] = 1.0 - 2.0 * (xx + zz)
+            matrices[:, 1, 2] = 2.0 * (yz - wx)
+            matrices[:, 2, 0] = 2.0 * (xz - wy)
+            matrices[:, 2, 1] = 2.0 * (yz + wx)
+            matrices[:, 2, 2] = 1.0 - 2.0 * (xx + yy)
+            return matrices
+
+        def rotation_matrices_to_quaternions(matrices):
+            quaternions = np.zeros((len(matrices), 4), dtype=np.float64)
+            trace = matrices[:, 0, 0] + matrices[:, 1, 1] + matrices[:, 2, 2]
+            mask = trace > 0.0
+            if np.any(mask):
+                s = np.sqrt(trace[mask] + 1.0) * 2.0
+                quaternions[mask, 0] = 0.25 * s
+                quaternions[mask, 1] = (matrices[mask, 2, 1] - matrices[mask, 1, 2]) / s
+                quaternions[mask, 2] = (matrices[mask, 0, 2] - matrices[mask, 2, 0]) / s
+                quaternions[mask, 3] = (matrices[mask, 1, 0] - matrices[mask, 0, 1]) / s
+            mask_x = (~mask) & (matrices[:, 0, 0] > matrices[:, 1, 1]) & (matrices[:, 0, 0] > matrices[:, 2, 2])
+            if np.any(mask_x):
+                s = np.sqrt(1.0 + matrices[mask_x, 0, 0] - matrices[mask_x, 1, 1] - matrices[mask_x, 2, 2]) * 2.0
+                quaternions[mask_x, 0] = (matrices[mask_x, 2, 1] - matrices[mask_x, 1, 2]) / s
+                quaternions[mask_x, 1] = 0.25 * s
+                quaternions[mask_x, 2] = (matrices[mask_x, 0, 1] + matrices[mask_x, 1, 0]) / s
+                quaternions[mask_x, 3] = (matrices[mask_x, 0, 2] + matrices[mask_x, 2, 0]) / s
+            mask_y = (~mask) & (~mask_x) & (matrices[:, 1, 1] > matrices[:, 2, 2])
+            if np.any(mask_y):
+                s = np.sqrt(1.0 + matrices[mask_y, 1, 1] - matrices[mask_y, 0, 0] - matrices[mask_y, 2, 2]) * 2.0
+                quaternions[mask_y, 0] = (matrices[mask_y, 0, 2] - matrices[mask_y, 2, 0]) / s
+                quaternions[mask_y, 1] = (matrices[mask_y, 0, 1] + matrices[mask_y, 1, 0]) / s
+                quaternions[mask_y, 2] = 0.25 * s
+                quaternions[mask_y, 3] = (matrices[mask_y, 1, 2] + matrices[mask_y, 2, 1]) / s
+            mask_z = (~mask) & (~mask_x) & (~mask_y)
+            if np.any(mask_z):
+                s = np.sqrt(1.0 + matrices[mask_z, 2, 2] - matrices[mask_z, 0, 0] - matrices[mask_z, 1, 1]) * 2.0
+                quaternions[mask_z, 0] = (matrices[mask_z, 1, 0] - matrices[mask_z, 0, 1]) / s
+                quaternions[mask_z, 1] = (matrices[mask_z, 0, 2] + matrices[mask_z, 2, 0]) / s
+                quaternions[mask_z, 2] = (matrices[mask_z, 1, 2] + matrices[mask_z, 2, 1]) / s
+                quaternions[mask_z, 3] = 0.25 * s
+            norms = np.linalg.norm(quaternions, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-12)
+            quaternions /= norms
+            negative_w = quaternions[:, 0] < 0.0
+            quaternions[negative_w] *= -1.0
+            return quaternions
+
+        def get_object_linear_transform(obj):
+            linear_transform = np.array(obj.matrix_basis.to_3x3(), dtype=np.float64)
+            _, rotation_quat, _ = obj.matrix_basis.decompose()
+            rotation_matrix = np.array(rotation_quat.to_matrix(), dtype=np.float64)
+            return linear_transform, rotation_matrix, rotation_quat
+
+        def bake_scale_and_rotation_attributes(obj, linear_transform, face_vertex_indices=None, expected_vertex_count=None):
+            rotation_attrs, quaternions = get_rotation_attribute_data(
+                obj,
+                face_vertex_indices=face_vertex_indices,
+                expected_vertex_count=expected_vertex_count,
+            )
+            scale_attrs, log_scales = get_scale_attribute_data(
+                obj,
+                face_vertex_indices=face_vertex_indices,
+                expected_vertex_count=expected_vertex_count,
+            )
+            scales = np.exp(log_scales)
+            rotation_mats = quaternions_to_rotation_matrices(quaternions)
+            scale_sq = np.zeros((len(scales), 3, 3), dtype=np.float64)
+            scale_sq[:, 0, 0] = scales[:, 0] ** 2
+            scale_sq[:, 1, 1] = scales[:, 1] ** 2
+            scale_sq[:, 2, 2] = scales[:, 2] ** 2
+            # Standard 3DGS covariance convention: Sigma = R * diag(scale^2) * R^T
+            covariances = np.matmul(rotation_mats, np.matmul(scale_sq, np.transpose(rotation_mats, (0, 2, 1))))
+            transformed_covariances = np.matmul(
+                linear_transform[None, :, :],
+                np.matmul(covariances, linear_transform.T[None, :, :]),
+            )
+            eigenvalues, eigenvectors = np.linalg.eigh(transformed_covariances)
+            order = np.argsort(eigenvalues, axis=1)[:, ::-1]
+            sorted_values = np.take_along_axis(eigenvalues, order, axis=1)
+            sorted_vectors = np.take_along_axis(eigenvectors, order[:, None, :], axis=2)
+            dets = np.linalg.det(sorted_vectors)
+            flip_mask = dets < 0.0
+            sorted_vectors[flip_mask, :, 2] *= -1.0
+            new_quaternions = rotation_matrices_to_quaternions(sorted_vectors)
+            new_scales = np.sqrt(np.maximum(sorted_values, 1e-20))
+            new_log_scales = np.log(new_scales)
+            for attr_index, attr_context in enumerate(rotation_attrs):
+                set_attribute_context_values(
+                    attr_context,
+                    new_quaternions[:, attr_index],
+                    face_vertex_indices=face_vertex_indices,
+                    expected_vertex_count=expected_vertex_count,
+                )
+            for attr_index, attr_context in enumerate(scale_attrs):
+                set_attribute_context_values(
+                    attr_context,
+                    new_log_scales[:, attr_index],
+                    face_vertex_indices=face_vertex_indices,
+                    expected_vertex_count=expected_vertex_count,
+                )
+            return len(new_quaternions)
+
+        def fibonacci_sphere(sample_count):
+            indices = np.arange(sample_count, dtype=np.float64) + 0.5
+            phi = np.arccos(1.0 - 2.0 * indices / sample_count)
+            theta = math.pi * (1.0 + math.sqrt(5.0)) * indices
+            x = np.cos(theta) * np.sin(phi)
+            y = np.sin(theta) * np.sin(phi)
+            z = np.cos(phi)
+            return np.stack([x, y, z], axis=1)
+
+        def evaluate_real_sh_basis(directions):
+            x = directions[:, 0]
+            y = directions[:, 1]
+            z = directions[:, 2]
+            xx = x * x
+            yy = y * y
+            zz = z * z
+            xy = x * y
+            yz = y * z
+            xz = x * z
+            basis = np.empty((len(directions), 16), dtype=np.float64)
+            basis[:, 0] = SH_C0
+            basis[:, 1] = -SH_C1 * y
+            basis[:, 2] = SH_C1 * z
+            basis[:, 3] = -SH_C1 * x
+            basis[:, 4] = SH_C2_0 * xy
+            basis[:, 5] = SH_C2_1 * yz
+            basis[:, 6] = SH_C2_2 * (2.0 * zz - xx - yy)
+            basis[:, 7] = SH_C2_3 * xz
+            basis[:, 8] = SH_C2_4 * (xx - yy)
+            basis[:, 9] = SH_C3_0 * y * (3.0 * xx - yy)
+            basis[:, 10] = SH_C3_1 * xy * z
+            basis[:, 11] = SH_C3_2 * y * (4.0 * zz - xx - yy)
+            basis[:, 12] = SH_C3_3 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy)
+            basis[:, 13] = SH_C3_4 * x * (4.0 * zz - xx - yy)
+            basis[:, 14] = SH_C3_5 * z * (xx - yy)
+            basis[:, 15] = SH_C3_6 * x * (xx - 3.0 * yy)
+            return basis
+
+        def build_sh_rotation_matrix(rotation_matrix, sh_degree):
+            total_coeffs = (sh_degree + 1) ** 2
+            if total_coeffs == 1:
+                return np.eye(1, dtype=np.float64)
+            sample_dirs = fibonacci_sphere(256)
+            rotated_dirs = sample_dirs @ rotation_matrix
+            full_basis = evaluate_real_sh_basis(sample_dirs)
+            rotated_basis = evaluate_real_sh_basis(rotated_dirs)
+            rotation_matrix_full = np.zeros((total_coeffs, total_coeffs), dtype=np.float64)
+            rotation_matrix_full[0, 0] = 1.0
+            degree_offsets = {
+                1: (1, 4),
+                2: (4, 9),
+                3: (9, 16),
+            }
+            for degree in range(1, sh_degree + 1):
+                start, end = degree_offsets[degree]
+                basis_block = full_basis[:, start:end]
+                rotated_block = rotated_basis[:, start:end]
+                solved_block, _, _, _ = np.linalg.lstsq(basis_block, rotated_block, rcond=None)
+                rotation_matrix_full[start:end, start:end] = solved_block
+            return rotation_matrix_full
+
+        def get_sh_attribute_layout(obj, face_vertex_indices=None, expected_vertex_count=None):
+            dc_attrs = []
+            for attr_name in DC_ATTRIBUTES:
+                attr_context = get_float_attribute_context(
+                    obj,
+                    attr_name,
+                    face_vertex_indices=face_vertex_indices,
+                    expected_vertex_count=expected_vertex_count,
+                )
+                dc_attrs.append(attr_context)
+            f_rest_fields = [attr.name for attr in obj.data.attributes if attr.name.startswith("f_rest_")]
+            f_rest_fields = sorted(f_rest_fields, key=lambda name: int(name.split("_")[-1]))
+            if not f_rest_fields:
+                return None, 0
+            if len(f_rest_fields) % 3 != 0:
+                raise ValueError("f_rest attributes are incomplete. Expected 3 matching channels.")
+            coeffs_per_channel = 1 + (len(f_rest_fields) // 3)
+            if coeffs_per_channel not in SUPPORTED_SH_COEFFS:
+                raise ValueError(
+                    f"Unsupported SH layout on '{obj.name}'. Found {coeffs_per_channel} coeffs per channel."
+                )
+            channel_rest_count = coeffs_per_channel - 1
+            channel_attrs = []
+            for channel_index in range(3):
+                attrs = []
+                values = []
+                dc_context = dc_attrs[channel_index]
+                attrs.append(dc_context)
+                values.append(dc_context["logical_values"])
+                start = channel_index * channel_rest_count
+                end = start + channel_rest_count
+                for attr_name in f_rest_fields[start:end]:
+                    attr_context = get_float_attribute_context(
+                        obj,
+                        attr_name,
+                        face_vertex_indices=face_vertex_indices,
+                        expected_vertex_count=expected_vertex_count,
+                    )
+                    attrs.append(attr_context)
+                    values.append(attr_context["logical_values"])
+                channel_attrs.append((attrs, np.stack(values, axis=1)))
+            sh_degree = SUPPORTED_SH_COEFFS[coeffs_per_channel]
+            return channel_attrs, sh_degree
+
+        def bake_sh_attributes(obj, rotation_matrix, face_vertex_indices=None, expected_vertex_count=None):
+            channel_data, sh_degree = get_sh_attribute_layout(
+                obj,
+                face_vertex_indices=face_vertex_indices,
+                expected_vertex_count=expected_vertex_count,
+            )
+            if sh_degree == 0:
+                return 0
+            sh_rotation = build_sh_rotation_matrix(rotation_matrix, sh_degree)
+            for attrs, coeffs in channel_data:
+                rotated_coeffs = coeffs @ sh_rotation.T
+                for attr_index, attr_context in enumerate(attrs):
+                    set_attribute_context_values(
+                        attr_context,
+                        rotated_coeffs[:, attr_index],
+                        face_vertex_indices=face_vertex_indices,
+                        expected_vertex_count=expected_vertex_count,
+                    )
+            return sh_degree
+
+        def apply_object_rotation_and_scale(obj):
+            original_mode = obj.mode
+            view_layer = bpy.context.view_layer
+            original_active = view_layer.objects.active
+            originally_selected = list(bpy.context.selected_objects)
+            try:
+                if original_mode != "OBJECT":
+                    bpy.ops.object.mode_set(mode="OBJECT")
+                for selected_obj in originally_selected:
+                    selected_obj.select_set(False)
+                obj.select_set(True)
+                view_layer.objects.active = obj
+                bpy.ops.object.transform_apply(
+                    location=False,
+                    rotation=True,
+                    scale=True,
+                )
+            finally:
+                obj.select_set(False)
+                for selected_obj in originally_selected:
+                    if selected_obj and selected_obj.name in bpy.data.objects:
+                        selected_obj.select_set(True)
+                if original_active and original_active.name in bpy.data.objects:
+                    view_layer.objects.active = original_active
+                if original_mode != "OBJECT":
+                    try:
+                        bpy.ops.object.mode_set(mode=original_mode)
+                    except Exception:
+                        pass
+
+        def main():
+            obj = get_target_mesh_object(target_obj_name)
+            expected_vertex_count = len(obj.data.vertices)
+            face_vertex_indices = get_face_quad_vertex_groups(obj.data)
+            if face_vertex_indices is not None:
+                print(
+                    f"Detected face-based gaussian mesh '{obj.name}', collapsing "
+                    f"{expected_vertex_count:,} quad vertices to {len(face_vertex_indices):,} logical splats for transform bake."
+                )
+            linear_transform, rotation_matrix, rotation_quat = get_object_linear_transform(obj)
+            splat_count = bake_scale_and_rotation_attributes(
+                obj,
+                linear_transform,
+                face_vertex_indices=face_vertex_indices,
+                expected_vertex_count=expected_vertex_count,
+            )
+            sh_degree = bake_sh_attributes(
+                obj,
+                rotation_matrix,
+                face_vertex_indices=face_vertex_indices,
+                expected_vertex_count=expected_vertex_count,
+            )
+            apply_object_rotation_and_scale(obj)
+            print(f"Baked scale/rotation into {splat_count:,} splats on '{obj.name}'.")
+            if sh_degree > 0:
+                print(f"Rotated SH attributes up to degree {sh_degree}.")
+            else:
+                print("No higher SH attributes found to rotate.")
+            print(
+                "Applied object rotation/scale to mesh and reset object transforms "
+                f"(object rotation quaternion was {rotation_quat.w:.6f}, {rotation_quat.x:.6f}, "
+                f"{rotation_quat.y:.6f}, {rotation_quat.z:.6f})."
+            )
+            print("3DGS transform bake completed.")
+        main()
+        bpy.ops.object.transform_apply('INVOKE_DEFAULT', location=self.sna_apply_location)
+        return {"FINISHED"}
+
+    def draw(self, context):
+        layout = self.layout
+        box_84D03 = layout.box()
+        box_84D03.alert = False
+        box_84D03.enabled = True
+        box_84D03.active = True
+        box_84D03.use_property_split = False
+        box_84D03.use_property_decorate = False
+        box_84D03.alignment = 'Expand'.upper()
+        box_84D03.scale_x = 1.0
+        box_84D03.scale_y = 1.0
+        if not True: box_84D03.operator_context = "EXEC_DEFAULT"
+        box_84D03.prop(self, 'sna_apply_location', text='Apply Location', icon_value=0, emboss=True)
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=300)
+
+
+class SNA_OT_Dgs_Render_Convert_Face_3Dgs_To_Vert_3Dgs_Fc49C(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_convert_face_3dgs_to_vert_3dgs_fc49c"
+    bl_label = "3DGS Render: Convert Face 3DGS to Vert 3DGS"
+    bl_description = "Convert the active Face Imported 3DGS mesh to a Vert based 3DGS object and apply transforms."
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -1121,283 +1676,1208 @@ class SNA_OT_Dgs_Render_Apply_3Dgs_Tranforms_5B665(bpy.types.Operator):
         return not False
 
     def execute(self, context):
-        if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Render_GN' in bpy.context.view_layer.objects.active.modifiers):
-            modifier_name = 'KIRI_3DGS_Render_GN'
-            object_name = bpy.context.view_layer.objects.active.name
-            obj = bpy.data.objects.get(object_name)
-            if obj:
-                modifier = obj.modifiers.get(modifier_name)
-                if modifier:
-                    if not modifier.show_viewport:
-                        # Simply remove the modifier if it's hidden
-                        obj.modifiers.remove(modifier)
-                        print(f"Removed hidden modifier '{modifier_name}' from object '{object_name}'.")
-                    else:
-                        # Apply normally if visible
-                        bpy.ops.object.modifier_apply(modifier=modifier_name)
-                        print(f"Applied visible modifier '{modifier_name}' to object '{object_name}'.")
-                else:
-                    print(f"Modifier '{modifier_name}' not found on object '{object_name}'.")
-            else:
-                print(f"Object '{object_name}' not found.")
-        if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Adjust_Colour_And_Material' in bpy.context.view_layer.objects.active.modifiers):
-            modifier_name = 'KIRI_3DGS_Adjust_Colour_And_Material'
-            object_name = bpy.context.view_layer.objects.active.name
-            obj = bpy.data.objects.get(object_name)
-            if obj:
-                modifier = obj.modifiers.get(modifier_name)
-                if modifier:
-                    if not modifier.show_viewport:
-                        # Simply remove the modifier if it's hidden
-                        obj.modifiers.remove(modifier)
-                        print(f"Removed hidden modifier '{modifier_name}' from object '{object_name}'.")
-                    else:
-                        # Apply normally if visible
-                        bpy.ops.object.modifier_apply(modifier=modifier_name)
-                        print(f"Applied visible modifier '{modifier_name}' to object '{object_name}'.")
-                else:
-                    print(f"Modifier '{modifier_name}' not found on object '{object_name}'.")
-            else:
-                print(f"Object '{object_name}' not found.")
-        APPLY_SCALE = True
-        APPLY_ROTATION = True
-        TRANSFORM_ORDER = 'ROTATION_FIRST'
+        target_obj_name = bpy.context.view_layer.objects.active.name
         import numpy as np
-        from mathutils import Quaternion, Matrix, Euler
-        #------ INPUT VARIABLES (modify these) ------#
-        # The attributes to update
-        SCALE_ATTRIBUTES = ["scale_0", "scale_1", "scale_2"]
-        ROTATION_ATTRIBUTES = ["rot_0", "rot_1", "rot_2", "rot_3"]
-        # Whether to apply transformations after updating attributes
-        #APPLY_SCALE = True
-        #APPLY_ROTATION = True
-        # The order of operations: either "SCALE_FIRST" or "ROTATION_FIRST"
-        # 3DGS typically uses SCALE_FIRST (scale, then rotate)
-        #TRANSFORM_ORDER = "SCALE_FIRST"
-        # Whether to print debug information
-        VERBOSE = True
-        # Whether to normalize quaternions after transformation (PostShot does this)
-        NORMALIZE_QUATERNIONS = True
-        #------------------------------------------#
+        #target_obj_name = ""  # Input: name of the mesh 3DGS object to process
+        SCALE_ATTRIBUTES = ("scale_0", "scale_1", "scale_2")
+        ROTATION_ATTRIBUTES = ("rot_0", "rot_1", "rot_2", "rot_3")
+        DC_ATTRIBUTES = ("f_dc_0", "f_dc_1", "f_dc_2")
+        SUPPORTED_SH_COEFFS = {1: 0, 4: 1, 9: 2, 16: 3}
+        SH_C0 = 0.28209479177387814
+        SH_C1 = 0.4886025119029199
+        SH_C2_0 = 1.0925484305920792
+        SH_C2_1 = -1.0925484305920792
+        SH_C2_2 = 0.31539156525252005
+        SH_C2_3 = -1.0925484305920792
+        SH_C2_4 = 0.5462742152960396
+        SH_C3_0 = -0.5900435899266435
+        SH_C3_1 = 2.890611442640554
+        SH_C3_2 = -0.4570457994644658
+        SH_C3_3 = 0.3731763325901154
+        SH_C3_4 = -0.4570457994644658
+        SH_C3_5 = 1.445305721320277
+        SH_C3_6 = -0.5900435899266435
+        SUPPORTED_POINT_ATTRIBUTE_TYPES = {
+            "FLOAT": {"prop": "value", "components": 1, "dtype": np.float32, "collapse": "mean"},
+            "FLOAT_VECTOR": {"prop": "vector", "components": 3, "dtype": np.float32, "collapse": "mean"},
+            "FLOAT_COLOR": {"prop": "color", "components": 4, "dtype": np.float32, "collapse": "mean"},
+            "INT": {"prop": "value", "components": 1, "dtype": np.int32, "collapse": "first"},
+            "BOOLEAN": {"prop": "value", "components": 1, "dtype": np.bool_, "collapse": "first"},
+        }
 
-        def quaternion_multiply(q1, q2):
-            """
-            Multiply two quaternions (compose rotations)
-            q1 and q2 are in form [w, x, y, z]
-            """
-            w1, x1, y1, z1 = q1
-            w2, x2, y2, z2 = q2
-            w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
-            x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
-            y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
-            z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
-            return [w, x, y, z]
+        def get_target_mesh_object(obj_name):
+            obj_name = str(obj_name).strip()
+            if not obj_name:
+                raise ValueError("target_obj_name is empty. Provide the mesh object name to process.")
+            obj = bpy.data.objects.get(obj_name)
+            if not obj:
+                raise ValueError(f"Object '{obj_name}' was not found.")
+            if obj.type != "MESH":
+                raise ValueError(f"Object '{obj.name}' is not a mesh.")
+            if not hasattr(obj.data, "attributes"):
+                raise ValueError(f"Object '{obj.name}' does not have attribute data.")
+            return obj
 
-        def normalize_quaternion(q):
-            """
-            Normalize a quaternion to unit length
-            q is in form [w, x, y, z]
-            """
-            magnitude = math.sqrt(q[0]**2 + q[1]**2 + q[2]**2 + q[3]**2)
-            if magnitude > 0.00001:  # Avoid division by near-zero
-                return [q[0]/magnitude, q[1]/magnitude, q[2]/magnitude, q[3]/magnitude]
-            else:
-                return [1.0, 0.0, 0.0, 0.0]  # Default to identity quaternion
+        def get_float_attribute(obj, attr_name):
+            if attr_name not in obj.data.attributes:
+                raise ValueError(f"Attribute '{attr_name}' not found on object '{obj.name}'.")
+            attr = obj.data.attributes[attr_name]
+            if attr.data_type != "FLOAT":
+                raise ValueError(
+                    f"Attribute '{attr_name}' must be FLOAT, found {attr.data_type}."
+                )
+            values = np.empty(len(attr.data), dtype=np.float32)
+            attr.data.foreach_get("value", values)
+            return attr, values
 
-        def update_scale_attributes(obj, scale_attributes, log_scale_factors, verbose=False):
-            """
-            Update the scale attributes with logarithmic scale factors
-            """
-            success = True
-            for attr_idx, attr_name in enumerate(scale_attributes):
-                if attr_name not in obj.data.attributes:
-                    print(f"Attribute '{attr_name}' not found on object.")
-                    success = False
-                    continue
-                attr = obj.data.attributes[attr_name]
-                if verbose:
-                    print(f"\nUpdating attribute: {attr_name}")
-                    print(f"Data type: {attr.data_type}")
-                    print(f"Domain: {attr.domain}")
-                    print(f"Length: {len(attr.data)}")
-                # Determine which scale factor to use based on attribute name
-                if attr_name == "scale_0":
-                    log_scale = log_scale_factors[0]
-                elif attr_name == "scale_1":
-                    log_scale = log_scale_factors[1]
-                elif attr_name == "scale_2":
-                    log_scale = log_scale_factors[2]
-                else:
-                    # For custom-named attributes, use the index in the scale_attributes list
-                    log_scale = log_scale_factors[min(attr_idx, 2)]
-                if verbose:
-                    print(f"Using log scale factor: {log_scale}")
-                # Update the attribute values
-                if attr.data_type == 'FLOAT':
-                    # Sample a few values before and after for verification
-                    sample_size = min(5, len(attr.data))
-                    before_values = []
-                    for i in range(sample_size):
-                        before_values.append(attr.data[i].value)
-                    # Update all values
-                    for i in range(len(attr.data)):
-                        # In 3DGS, adding the log of the scale factor to the log-space scale value
-                        attr.data[i].value += log_scale
-                    # Print sample values after update
-                    if verbose:
-                        print("Sample values before and after update:")
-                        for i in range(sample_size):
-                            print(f"  [{i}]: {before_values[i]} -> {attr.data[i].value}")
-                else:
-                    print(f"Attribute '{attr_name}' is not of type FLOAT (found {attr.data_type}). Skipping.")
-                    success = False
-            return success
+        def get_face_quad_vertex_groups(mesh_data):
+            """Return one disconnected 4-vertex group per quad face for face-based gaussian meshes."""
+            num_polygons = len(mesh_data.polygons)
+            if num_polygons == 0:
+                return None
+            face_vertex_indices = np.empty((num_polygons, 4), dtype=np.int32)
+            for poly_index, poly in enumerate(mesh_data.polygons):
+                poly_vertices = tuple(poly.vertices)
+                if len(poly_vertices) != 4:
+                    return None
+                face_vertex_indices[poly_index] = poly_vertices
+            if np.unique(face_vertex_indices).size != len(mesh_data.vertices):
+                return None
+            return face_vertex_indices
 
-        def update_rotation_attributes(obj, rotation_attributes, blender_quat, verbose=False, normalize=True):
-            """
-            Update the rotation attributes with the object's rotation quaternion
-            """
-            # First, gather all data to avoid processing incomplete sets
-            attribute_data = {}
-            valid_attributes = True
-            for attr_name in rotation_attributes:
-                if attr_name not in obj.data.attributes:
-                    print(f"Attribute '{attr_name}' not found on object.")
-                    valid_attributes = False
-                    break
-                attr = obj.data.attributes[attr_name]
-                if attr.data_type != 'FLOAT':
-                    print(f"Attribute '{attr_name}' is not of type FLOAT (found {attr.data_type}). Skipping.")
-                    valid_attributes = False
-                    break
-                # Store the attribute for processing
-                attribute_data[attr_name] = attr
-            if not valid_attributes:
-                print("Unable to process rotation due to missing or invalid attributes.")
-                return False
-            # Sample a few values before the update for verification
-            sample_size = min(5, len(attribute_data[rotation_attributes[0]].data))
-            before_values = {attr_name: [] for attr_name in rotation_attributes}
-            for attr_name in rotation_attributes:
-                for i in range(sample_size):
-                    before_values[attr_name].append(attribute_data[attr_name].data[i].value)
-            # Process all points
-            num_points = len(attribute_data[rotation_attributes[0]].data)
-            print(f"Processing {num_points} points...")
-            for i in range(num_points):
-                # Get current quaternion values [w, x, y, z]
-                point_quat = [
-                    attribute_data[rotation_attributes[0]].data[i].value,  # w
-                    attribute_data[rotation_attributes[1]].data[i].value,  # x
-                    attribute_data[rotation_attributes[2]].data[i].value,  # y
-                    attribute_data[rotation_attributes[3]].data[i].value   # z
-                ]
-                # Apply rotation by multiplying quaternions
-                # The order matters: PostShot appears to use the object_rotation * point_quat
-                # format (rotating the local frame)
-                new_quat = quaternion_multiply(blender_quat, point_quat)
-                # Normalize the quaternion if requested (PostShot does this)
-                if normalize:
-                    new_quat = normalize_quaternion(new_quat)
-                # Enforce positive w component to match PostShot's convention
-                # Since q and -q represent the same rotation, we can flip all signs if w is negative
-                if new_quat[0] < 0:
-                    new_quat = [-q for q in new_quat]
-                # Update attribute values
-                attribute_data[rotation_attributes[0]].data[i].value = new_quat[0]  # w
-                attribute_data[rotation_attributes[1]].data[i].value = new_quat[1]  # x
-                attribute_data[rotation_attributes[2]].data[i].value = new_quat[2]  # y
-                attribute_data[rotation_attributes[3]].data[i].value = new_quat[3]  # z
-            # Print sample values after update for verification
-            if verbose:
-                print("\nSample values before and after update:")
-                for i in range(sample_size):
-                    print(f"Point [{i}]:")
-                    for j, attr_name in enumerate(rotation_attributes):
-                        print(f"  {attr_name}: {before_values[attr_name][i]} -> {attribute_data[attr_name].data[i].value}")
-            return True
-
-        def apply_transformations(obj, apply_rotation=False, apply_scale=False):
-            """
-            Apply the transformations to the object
-            """
-            if not (apply_rotation or apply_scale):
-                return
-            # Store current context
-            original_mode = obj.mode
-            # Switch to object mode if needed
-            if original_mode != 'OBJECT':
-                bpy.ops.object.mode_set(mode='OBJECT')
-            # Apply transformations
-            bpy.ops.object.transform_apply(
-                location=False, 
-                rotation=apply_rotation, 
-                scale=apply_scale
+        def collapse_attribute_values(data_array, face_vertex_indices, expected_vertex_count, attr_name):
+            """Collapse per-vertex data to one logical value per disconnected quad when needed."""
+            if face_vertex_indices is None:
+                return data_array.astype(np.float64)
+            if len(data_array) == expected_vertex_count:
+                return data_array[face_vertex_indices].mean(axis=1).astype(np.float64)
+            if len(data_array) == len(face_vertex_indices):
+                return data_array.astype(np.float64)
+            raise ValueError(
+                f"Attribute '{attr_name}' has {len(data_array)} values, expected {expected_vertex_count} vertices "
+                f"or {len(face_vertex_indices)} face islands."
             )
-            # Restore original mode
-            if original_mode != 'OBJECT':
-                bpy.ops.object.mode_set(mode=original_mode)
-            transformations = []
-            if apply_rotation:
-                transformations.append("rotation")
-            if apply_scale:
-                transformations.append("scale")
-            print(f"Object {', '.join(transformations)} applied.")
-        # MAIN SCRIPT EXECUTION
+
+        def expand_attribute_values(logical_values, raw_length, face_vertex_indices, expected_vertex_count, attr_name):
+            """Expand logical splat values back to the attribute storage domain."""
+            logical_values = np.asarray(logical_values, dtype=np.float64)
+            if face_vertex_indices is None:
+                if len(logical_values) != raw_length:
+                    raise ValueError(
+                        f"Attribute '{attr_name}' expects {raw_length} values, got {len(logical_values)}."
+                    )
+                return logical_values.astype(np.float32)
+            if raw_length == len(face_vertex_indices):
+                if len(logical_values) != len(face_vertex_indices):
+                    raise ValueError(
+                        f"Attribute '{attr_name}' expects {len(face_vertex_indices)} logical values, got {len(logical_values)}."
+                    )
+                return logical_values.astype(np.float32)
+            if raw_length == expected_vertex_count:
+                if len(logical_values) != len(face_vertex_indices):
+                    raise ValueError(
+                        f"Attribute '{attr_name}' expects {len(face_vertex_indices)} logical values for face expansion, "
+                        f"got {len(logical_values)}."
+                    )
+                expanded = np.empty(expected_vertex_count, dtype=np.float64)
+                expanded[face_vertex_indices] = logical_values[:, None]
+                return expanded.astype(np.float32)
+            raise ValueError(
+                f"Attribute '{attr_name}' has unsupported storage length {raw_length} for face-based expansion."
+            )
+
+        def collapse_generic_attribute_values(data_array, face_vertex_indices, expected_vertex_count, attr_name, mode="mean"):
+            """Collapse scalar/vector/color point data to one logical value per disconnected quad."""
+            data_array = np.asarray(data_array)
+            if face_vertex_indices is None:
+                return data_array.copy()
+            if len(data_array) != expected_vertex_count:
+                raise ValueError(
+                    f"Attribute '{attr_name}' has {len(data_array)} values, expected {expected_vertex_count} point-domain values."
+                )
+            grouped = data_array[face_vertex_indices]
+            if mode == "first":
+                return grouped[:, 0].copy()
+            return grouped.mean(axis=1)
+
+        def get_float_attribute_context(obj, attr_name, face_vertex_indices=None, expected_vertex_count=None):
+            attr, raw_values = get_float_attribute(obj, attr_name)
+            if expected_vertex_count is None:
+                expected_vertex_count = len(obj.data.vertices)
+            logical_values = collapse_attribute_values(
+                raw_values,
+                face_vertex_indices,
+                expected_vertex_count,
+                attr_name,
+            )
+            return {
+                "attr": attr,
+                "attr_name": attr_name,
+                "raw_length": len(raw_values),
+                "logical_values": logical_values,
+            }
+
+        def capture_point_attributes_for_face_collapse(obj, face_vertex_indices, expected_vertex_count):
+            """Capture supported point attributes before converting a face-based mesh to true splat vertices."""
+            attribute_specs = []
+            for attr in obj.data.attributes:
+                if attr.domain != "POINT":
+                    continue
+                if attr.name == "position":
+                    continue
+                type_info = SUPPORTED_POINT_ATTRIBUTE_TYPES.get(attr.data_type)
+                if type_info is None:
+                    continue
+                component_count = type_info["components"]
+                raw_values = np.empty(len(attr.data) * component_count, dtype=type_info["dtype"])
+                attr.data.foreach_get(type_info["prop"], raw_values)
+                if component_count > 1:
+                    raw_values = raw_values.reshape(-1, component_count)
+                collapsed_values = collapse_generic_attribute_values(
+                    raw_values,
+                    face_vertex_indices,
+                    expected_vertex_count,
+                    attr.name,
+                    mode=type_info["collapse"],
+                )
+                attribute_specs.append(
+                    {
+                        "name": attr.name,
+                        "data_type": attr.data_type,
+                        "prop": type_info["prop"],
+                        "components": component_count,
+                        "values": np.asarray(collapsed_values, dtype=type_info["dtype"]),
+                    }
+                )
+            return attribute_specs
+
+        def clear_rebuildable_attributes(mesh_data):
+            """Remove custom attributes that will be recreated after topology conversion."""
+            for attr in list(mesh_data.attributes):
+                if attr.name == "position":
+                    continue
+                try:
+                    mesh_data.attributes.remove(attr)
+                except Exception:
+                    pass
+
+        def recreate_point_attributes(mesh_data, attribute_specs):
+            """Recreate captured point-domain attributes after converting to a true vert-based mesh."""
+            for spec in attribute_specs:
+                attr = mesh_data.attributes.new(spec["name"], spec["data_type"], "POINT")
+                values = np.asarray(spec["values"], dtype=spec["values"].dtype)
+                if spec["components"] > 1:
+                    attr.data.foreach_set(spec["prop"], values.reshape(-1))
+                else:
+                    attr.data.foreach_set(spec["prop"], values)
+
+        def collapse_face_based_mesh_to_points(obj, face_vertex_indices):
+            """Convert disconnected quad-based 3DGS storage into one vertex per splat for universal export/bake."""
+            mesh_data = obj.data
+            expected_vertex_count = len(mesh_data.vertices)
+            positions = np.empty(expected_vertex_count * 3, dtype=np.float32)
+            mesh_data.vertices.foreach_get("co", positions)
+            positions = positions.reshape(-1, 3)
+            collapsed_positions = positions[face_vertex_indices].mean(axis=1).astype(np.float32)
+            attribute_specs = capture_point_attributes_for_face_collapse(
+                obj,
+                face_vertex_indices,
+                expected_vertex_count,
+            )
+            clear_rebuildable_attributes(mesh_data)
+            mesh_data.clear_geometry()
+            mesh_data.from_pydata(collapsed_positions.tolist(), [], [])
+            recreate_point_attributes(mesh_data, attribute_specs)
+            mesh_data.update()
+            return len(collapsed_positions)
+
+        def set_attribute_context_values(context, logical_values, face_vertex_indices=None, expected_vertex_count=None):
+            if expected_vertex_count is None:
+                raise ValueError("expected_vertex_count is required when writing attribute values.")
+            values = expand_attribute_values(
+                logical_values,
+                context["raw_length"],
+                face_vertex_indices,
+                expected_vertex_count,
+                context["attr_name"],
+            )
+            context["attr"].data.foreach_set("value", values)
+
+        def get_rotation_attribute_data(obj, face_vertex_indices=None, expected_vertex_count=None):
+            attrs = []
+            values = []
+            for attr_name in ROTATION_ATTRIBUTES:
+                attr_context = get_float_attribute_context(
+                    obj,
+                    attr_name,
+                    face_vertex_indices=face_vertex_indices,
+                    expected_vertex_count=expected_vertex_count,
+                )
+                attrs.append(attr_context)
+                values.append(attr_context["logical_values"])
+            quaternions = np.stack(values, axis=1)
+            norms = np.linalg.norm(quaternions, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-12)
+            quaternions /= norms
+            return attrs, quaternions
+
+        def get_scale_attribute_data(obj, face_vertex_indices=None, expected_vertex_count=None):
+            attrs = []
+            values = []
+            for attr_name in SCALE_ATTRIBUTES:
+                attr_context = get_float_attribute_context(
+                    obj,
+                    attr_name,
+                    face_vertex_indices=face_vertex_indices,
+                    expected_vertex_count=expected_vertex_count,
+                )
+                attrs.append(attr_context)
+                values.append(attr_context["logical_values"])
+            log_scales = np.stack(values, axis=1)
+            return attrs, log_scales
+
+        def quaternions_to_rotation_matrices(quaternions):
+            w = quaternions[:, 0]
+            x = quaternions[:, 1]
+            y = quaternions[:, 2]
+            z = quaternions[:, 3]
+            xx = x * x
+            yy = y * y
+            zz = z * z
+            xy = x * y
+            xz = x * z
+            yz = y * z
+            wx = w * x
+            wy = w * y
+            wz = w * z
+            matrices = np.empty((len(quaternions), 3, 3), dtype=np.float64)
+            matrices[:, 0, 0] = 1.0 - 2.0 * (yy + zz)
+            matrices[:, 0, 1] = 2.0 * (xy - wz)
+            matrices[:, 0, 2] = 2.0 * (xz + wy)
+            matrices[:, 1, 0] = 2.0 * (xy + wz)
+            matrices[:, 1, 1] = 1.0 - 2.0 * (xx + zz)
+            matrices[:, 1, 2] = 2.0 * (yz - wx)
+            matrices[:, 2, 0] = 2.0 * (xz - wy)
+            matrices[:, 2, 1] = 2.0 * (yz + wx)
+            matrices[:, 2, 2] = 1.0 - 2.0 * (xx + yy)
+            return matrices
+
+        def rotation_matrices_to_quaternions(matrices):
+            quaternions = np.zeros((len(matrices), 4), dtype=np.float64)
+            trace = matrices[:, 0, 0] + matrices[:, 1, 1] + matrices[:, 2, 2]
+            mask = trace > 0.0
+            if np.any(mask):
+                s = np.sqrt(trace[mask] + 1.0) * 2.0
+                quaternions[mask, 0] = 0.25 * s
+                quaternions[mask, 1] = (matrices[mask, 2, 1] - matrices[mask, 1, 2]) / s
+                quaternions[mask, 2] = (matrices[mask, 0, 2] - matrices[mask, 2, 0]) / s
+                quaternions[mask, 3] = (matrices[mask, 1, 0] - matrices[mask, 0, 1]) / s
+            mask_x = (~mask) & (matrices[:, 0, 0] > matrices[:, 1, 1]) & (matrices[:, 0, 0] > matrices[:, 2, 2])
+            if np.any(mask_x):
+                s = np.sqrt(1.0 + matrices[mask_x, 0, 0] - matrices[mask_x, 1, 1] - matrices[mask_x, 2, 2]) * 2.0
+                quaternions[mask_x, 0] = (matrices[mask_x, 2, 1] - matrices[mask_x, 1, 2]) / s
+                quaternions[mask_x, 1] = 0.25 * s
+                quaternions[mask_x, 2] = (matrices[mask_x, 0, 1] + matrices[mask_x, 1, 0]) / s
+                quaternions[mask_x, 3] = (matrices[mask_x, 0, 2] + matrices[mask_x, 2, 0]) / s
+            mask_y = (~mask) & (~mask_x) & (matrices[:, 1, 1] > matrices[:, 2, 2])
+            if np.any(mask_y):
+                s = np.sqrt(1.0 + matrices[mask_y, 1, 1] - matrices[mask_y, 0, 0] - matrices[mask_y, 2, 2]) * 2.0
+                quaternions[mask_y, 0] = (matrices[mask_y, 0, 2] - matrices[mask_y, 2, 0]) / s
+                quaternions[mask_y, 1] = (matrices[mask_y, 0, 1] + matrices[mask_y, 1, 0]) / s
+                quaternions[mask_y, 2] = 0.25 * s
+                quaternions[mask_y, 3] = (matrices[mask_y, 1, 2] + matrices[mask_y, 2, 1]) / s
+            mask_z = (~mask) & (~mask_x) & (~mask_y)
+            if np.any(mask_z):
+                s = np.sqrt(1.0 + matrices[mask_z, 2, 2] - matrices[mask_z, 0, 0] - matrices[mask_z, 1, 1]) * 2.0
+                quaternions[mask_z, 0] = (matrices[mask_z, 1, 0] - matrices[mask_z, 0, 1]) / s
+                quaternions[mask_z, 1] = (matrices[mask_z, 0, 2] + matrices[mask_z, 2, 0]) / s
+                quaternions[mask_z, 2] = (matrices[mask_z, 1, 2] + matrices[mask_z, 2, 1]) / s
+                quaternions[mask_z, 3] = 0.25 * s
+            norms = np.linalg.norm(quaternions, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-12)
+            quaternions /= norms
+            negative_w = quaternions[:, 0] < 0.0
+            quaternions[negative_w] *= -1.0
+            return quaternions
+
+        def get_object_linear_transform(obj):
+            linear_transform = np.array(obj.matrix_basis.to_3x3(), dtype=np.float64)
+            _, rotation_quat, _ = obj.matrix_basis.decompose()
+            rotation_matrix = np.array(rotation_quat.to_matrix(), dtype=np.float64)
+            return linear_transform, rotation_matrix, rotation_quat
+
+        def bake_scale_and_rotation_attributes(obj, linear_transform, face_vertex_indices=None, expected_vertex_count=None):
+            rotation_attrs, quaternions = get_rotation_attribute_data(
+                obj,
+                face_vertex_indices=face_vertex_indices,
+                expected_vertex_count=expected_vertex_count,
+            )
+            scale_attrs, log_scales = get_scale_attribute_data(
+                obj,
+                face_vertex_indices=face_vertex_indices,
+                expected_vertex_count=expected_vertex_count,
+            )
+            scales = np.exp(log_scales)
+            rotation_mats = quaternions_to_rotation_matrices(quaternions)
+            scale_sq = np.zeros((len(scales), 3, 3), dtype=np.float64)
+            scale_sq[:, 0, 0] = scales[:, 0] ** 2
+            scale_sq[:, 1, 1] = scales[:, 1] ** 2
+            scale_sq[:, 2, 2] = scales[:, 2] ** 2
+            # Standard 3DGS covariance convention: Sigma = R * diag(scale^2) * R^T
+            covariances = np.matmul(rotation_mats, np.matmul(scale_sq, np.transpose(rotation_mats, (0, 2, 1))))
+            transformed_covariances = np.matmul(
+                linear_transform[None, :, :],
+                np.matmul(covariances, linear_transform.T[None, :, :]),
+            )
+            eigenvalues, eigenvectors = np.linalg.eigh(transformed_covariances)
+            order = np.argsort(eigenvalues, axis=1)[:, ::-1]
+            sorted_values = np.take_along_axis(eigenvalues, order, axis=1)
+            sorted_vectors = np.take_along_axis(eigenvectors, order[:, None, :], axis=2)
+            dets = np.linalg.det(sorted_vectors)
+            flip_mask = dets < 0.0
+            sorted_vectors[flip_mask, :, 2] *= -1.0
+            new_quaternions = rotation_matrices_to_quaternions(sorted_vectors)
+            new_scales = np.sqrt(np.maximum(sorted_values, 1e-20))
+            new_log_scales = np.log(new_scales)
+            for attr_index, attr_context in enumerate(rotation_attrs):
+                set_attribute_context_values(
+                    attr_context,
+                    new_quaternions[:, attr_index],
+                    face_vertex_indices=face_vertex_indices,
+                    expected_vertex_count=expected_vertex_count,
+                )
+            for attr_index, attr_context in enumerate(scale_attrs):
+                set_attribute_context_values(
+                    attr_context,
+                    new_log_scales[:, attr_index],
+                    face_vertex_indices=face_vertex_indices,
+                    expected_vertex_count=expected_vertex_count,
+                )
+            return len(new_quaternions)
+
+        def fibonacci_sphere(sample_count):
+            indices = np.arange(sample_count, dtype=np.float64) + 0.5
+            phi = np.arccos(1.0 - 2.0 * indices / sample_count)
+            theta = math.pi * (1.0 + math.sqrt(5.0)) * indices
+            x = np.cos(theta) * np.sin(phi)
+            y = np.sin(theta) * np.sin(phi)
+            z = np.cos(phi)
+            return np.stack([x, y, z], axis=1)
+
+        def evaluate_real_sh_basis(directions):
+            x = directions[:, 0]
+            y = directions[:, 1]
+            z = directions[:, 2]
+            xx = x * x
+            yy = y * y
+            zz = z * z
+            xy = x * y
+            yz = y * z
+            xz = x * z
+            basis = np.empty((len(directions), 16), dtype=np.float64)
+            basis[:, 0] = SH_C0
+            basis[:, 1] = -SH_C1 * y
+            basis[:, 2] = SH_C1 * z
+            basis[:, 3] = -SH_C1 * x
+            basis[:, 4] = SH_C2_0 * xy
+            basis[:, 5] = SH_C2_1 * yz
+            basis[:, 6] = SH_C2_2 * (2.0 * zz - xx - yy)
+            basis[:, 7] = SH_C2_3 * xz
+            basis[:, 8] = SH_C2_4 * (xx - yy)
+            basis[:, 9] = SH_C3_0 * y * (3.0 * xx - yy)
+            basis[:, 10] = SH_C3_1 * xy * z
+            basis[:, 11] = SH_C3_2 * y * (4.0 * zz - xx - yy)
+            basis[:, 12] = SH_C3_3 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy)
+            basis[:, 13] = SH_C3_4 * x * (4.0 * zz - xx - yy)
+            basis[:, 14] = SH_C3_5 * z * (xx - yy)
+            basis[:, 15] = SH_C3_6 * x * (xx - 3.0 * yy)
+            return basis
+
+        def build_sh_rotation_matrix(rotation_matrix, sh_degree):
+            total_coeffs = (sh_degree + 1) ** 2
+            if total_coeffs == 1:
+                return np.eye(1, dtype=np.float64)
+            sample_dirs = fibonacci_sphere(256)
+            rotated_dirs = sample_dirs @ rotation_matrix
+            full_basis = evaluate_real_sh_basis(sample_dirs)
+            rotated_basis = evaluate_real_sh_basis(rotated_dirs)
+            rotation_matrix_full = np.zeros((total_coeffs, total_coeffs), dtype=np.float64)
+            rotation_matrix_full[0, 0] = 1.0
+            degree_offsets = {
+                1: (1, 4),
+                2: (4, 9),
+                3: (9, 16),
+            }
+            for degree in range(1, sh_degree + 1):
+                start, end = degree_offsets[degree]
+                basis_block = full_basis[:, start:end]
+                rotated_block = rotated_basis[:, start:end]
+                solved_block, _, _, _ = np.linalg.lstsq(basis_block, rotated_block, rcond=None)
+                rotation_matrix_full[start:end, start:end] = solved_block
+            return rotation_matrix_full
+
+        def get_sh_attribute_layout(obj, face_vertex_indices=None, expected_vertex_count=None):
+            dc_attrs = []
+            for attr_name in DC_ATTRIBUTES:
+                attr_context = get_float_attribute_context(
+                    obj,
+                    attr_name,
+                    face_vertex_indices=face_vertex_indices,
+                    expected_vertex_count=expected_vertex_count,
+                )
+                dc_attrs.append(attr_context)
+            f_rest_fields = [attr.name for attr in obj.data.attributes if attr.name.startswith("f_rest_")]
+            f_rest_fields = sorted(f_rest_fields, key=lambda name: int(name.split("_")[-1]))
+            if not f_rest_fields:
+                return None, 0
+            if len(f_rest_fields) % 3 != 0:
+                raise ValueError("f_rest attributes are incomplete. Expected 3 matching channels.")
+            coeffs_per_channel = 1 + (len(f_rest_fields) // 3)
+            if coeffs_per_channel not in SUPPORTED_SH_COEFFS:
+                raise ValueError(
+                    f"Unsupported SH layout on '{obj.name}'. Found {coeffs_per_channel} coeffs per channel."
+                )
+            channel_rest_count = coeffs_per_channel - 1
+            channel_attrs = []
+            for channel_index in range(3):
+                attrs = []
+                values = []
+                dc_context = dc_attrs[channel_index]
+                attrs.append(dc_context)
+                values.append(dc_context["logical_values"])
+                start = channel_index * channel_rest_count
+                end = start + channel_rest_count
+                for attr_name in f_rest_fields[start:end]:
+                    attr_context = get_float_attribute_context(
+                        obj,
+                        attr_name,
+                        face_vertex_indices=face_vertex_indices,
+                        expected_vertex_count=expected_vertex_count,
+                    )
+                    attrs.append(attr_context)
+                    values.append(attr_context["logical_values"])
+                channel_attrs.append((attrs, np.stack(values, axis=1)))
+            sh_degree = SUPPORTED_SH_COEFFS[coeffs_per_channel]
+            return channel_attrs, sh_degree
+
+        def bake_sh_attributes(obj, rotation_matrix, face_vertex_indices=None, expected_vertex_count=None):
+            channel_data, sh_degree = get_sh_attribute_layout(
+                obj,
+                face_vertex_indices=face_vertex_indices,
+                expected_vertex_count=expected_vertex_count,
+            )
+            if sh_degree == 0:
+                return 0
+            sh_rotation = build_sh_rotation_matrix(rotation_matrix, sh_degree)
+            for attrs, coeffs in channel_data:
+                rotated_coeffs = coeffs @ sh_rotation.T
+                for attr_index, attr_context in enumerate(attrs):
+                    set_attribute_context_values(
+                        attr_context,
+                        rotated_coeffs[:, attr_index],
+                        face_vertex_indices=face_vertex_indices,
+                        expected_vertex_count=expected_vertex_count,
+                    )
+            return sh_degree
+
+        def apply_object_rotation_and_scale(obj):
+            original_mode = obj.mode
+            view_layer = bpy.context.view_layer
+            original_active = view_layer.objects.active
+            originally_selected = list(bpy.context.selected_objects)
+            try:
+                if original_mode != "OBJECT":
+                    bpy.ops.object.mode_set(mode="OBJECT")
+                for selected_obj in originally_selected:
+                    selected_obj.select_set(False)
+                obj.select_set(True)
+                view_layer.objects.active = obj
+                bpy.ops.object.transform_apply(
+                    location=False,
+                    rotation=True,
+                    scale=True,
+                )
+            finally:
+                obj.select_set(False)
+                for selected_obj in originally_selected:
+                    if selected_obj and selected_obj.name in bpy.data.objects:
+                        selected_obj.select_set(True)
+                if original_active and original_active.name in bpy.data.objects:
+                    view_layer.objects.active = original_active
+                if original_mode != "OBJECT":
+                    try:
+                        bpy.ops.object.mode_set(mode=original_mode)
+                    except Exception:
+                        pass
+
+        def main():
+            obj = get_target_mesh_object(target_obj_name)
+            expected_vertex_count = len(obj.data.vertices)
+            face_vertex_indices = get_face_quad_vertex_groups(obj.data)
+            if face_vertex_indices is not None:
+                original_face_vertex_count = expected_vertex_count
+                logical_splat_count = len(face_vertex_indices)
+                print(
+                    f"Detected face-based gaussian mesh '{obj.name}', collapsing "
+                    f"{original_face_vertex_count:,} quad vertices to {logical_splat_count:,} true splat vertices for transform bake."
+                )
+                expected_vertex_count = collapse_face_based_mesh_to_points(obj, face_vertex_indices)
+                face_vertex_indices = None
+                print(
+                    f"Converted '{obj.name}' to point-based 3DGS storage with "
+                    f"{expected_vertex_count:,} splat vertices."
+                )
+            linear_transform, rotation_matrix, rotation_quat = get_object_linear_transform(obj)
+            splat_count = bake_scale_and_rotation_attributes(
+                obj,
+                linear_transform,
+                face_vertex_indices=face_vertex_indices,
+                expected_vertex_count=expected_vertex_count,
+            )
+            sh_degree = bake_sh_attributes(
+                obj,
+                rotation_matrix,
+                face_vertex_indices=face_vertex_indices,
+                expected_vertex_count=expected_vertex_count,
+            )
+            apply_object_rotation_and_scale(obj)
+            print(f"Baked scale/rotation into {splat_count:,} splats on '{obj.name}'.")
+            if sh_degree > 0:
+                print(f"Rotated SH attributes up to degree {sh_degree}.")
+            else:
+                print("No higher SH attributes found to rotate.")
+            print(
+                "Applied object rotation/scale to mesh and reset object transforms "
+                f"(object rotation quaternion was {rotation_quat.w:.6f}, {rotation_quat.x:.6f}, "
+                f"{rotation_quat.y:.6f}, {rotation_quat.z:.6f})."
+            )
+            print("3DGS transform bake completed with face-based quads converted to point splats where needed.")
+        main()
+        bpy.ops.object.transform_apply('INVOKE_DEFAULT', location=True)
+        bpy.context.view_layer.objects.active['3DGS_Mesh_Type'] = 'vert'
+        if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Render_GN' in bpy.context.view_layer.objects.active.modifiers):
+            bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN'].show_in_editmode = False
+            bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN'].show_on_cage = False
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+class SNA_OT_Dgs_Render_Convert_Vert_3Dgs_To_Face_3Dgs_E6635(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_convert_vert_3dgs_to_face_3dgs_e6635"
+    bl_label = "3DGS Render: Convert Vert 3DGS to Face 3DGS"
+    bl_description = "Convert the active Vert Imported 3DGS mesh to a Face based 3DGS object and apply transforms."
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        target_obj_name = bpy.context.view_layer.objects.active.name
+        import numpy as np
+        #target_obj_name = ""  # Input: name of the mesh 3DGS object to process
+        SCALE_ATTRIBUTES = ("scale_0", "scale_1", "scale_2")
+        ROTATION_ATTRIBUTES = ("rot_0", "rot_1", "rot_2", "rot_3")
+        DC_ATTRIBUTES = ("f_dc_0", "f_dc_1", "f_dc_2")
+        SUPPORTED_SH_COEFFS = {1: 0, 4: 1, 9: 2, 16: 3}
+        SH_C0 = 0.28209479177387814
+        SH_C1 = 0.4886025119029199
+        SH_C2_0 = 1.0925484305920792
+        SH_C2_1 = -1.0925484305920792
+        SH_C2_2 = 0.31539156525252005
+        SH_C2_3 = -1.0925484305920792
+        SH_C2_4 = 0.5462742152960396
+        SH_C3_0 = -0.5900435899266435
+        SH_C3_1 = 2.890611442640554
+        SH_C3_2 = -0.4570457994644658
+        SH_C3_3 = 0.3731763325901154
+        SH_C3_4 = -0.4570457994644658
+        SH_C3_5 = 1.445305721320277
+        SH_C3_6 = -0.5900435899266435
+
+        def get_target_mesh_object(obj_name):
+            obj_name = str(obj_name).strip()
+            if not obj_name:
+                raise ValueError("target_obj_name is empty. Provide the mesh object name to process.")
+            obj = bpy.data.objects.get(obj_name)
+            if not obj:
+                raise ValueError(f"Object '{obj_name}' was not found.")
+            if obj.type != "MESH":
+                raise ValueError(f"Object '{obj.name}' is not a mesh.")
+            if not hasattr(obj.data, "attributes"):
+                raise ValueError(f"Object '{obj.name}' does not have attribute data.")
+            return obj
+
+        def get_float_attribute(obj, attr_name):
+            if attr_name not in obj.data.attributes:
+                raise ValueError(f"Attribute '{attr_name}' not found on object '{obj.name}'.")
+            attr = obj.data.attributes[attr_name]
+            if attr.data_type != "FLOAT":
+                raise ValueError(
+                    f"Attribute '{attr_name}' must be FLOAT, found {attr.data_type}."
+                )
+            values = np.empty(len(attr.data), dtype=np.float32)
+            attr.data.foreach_get("value", values)
+            return attr, values
+
+        def get_face_quad_vertex_groups(mesh_data):
+            """Return one disconnected 4-vertex group per quad face for face-based gaussian meshes."""
+            num_polygons = len(mesh_data.polygons)
+            if num_polygons == 0:
+                return None
+            face_vertex_indices = np.empty((num_polygons, 4), dtype=np.int32)
+            for poly_index, poly in enumerate(mesh_data.polygons):
+                poly_vertices = tuple(poly.vertices)
+                if len(poly_vertices) != 4:
+                    return None
+                face_vertex_indices[poly_index] = poly_vertices
+            if np.unique(face_vertex_indices).size != len(mesh_data.vertices):
+                return None
+            return face_vertex_indices
+
+        def collapse_attribute_values(data_array, face_vertex_indices, expected_vertex_count, attr_name):
+            """Collapse per-vertex data to one logical value per disconnected quad when needed."""
+            if face_vertex_indices is None:
+                return data_array.astype(np.float64)
+            if len(data_array) == expected_vertex_count:
+                return data_array[face_vertex_indices].mean(axis=1).astype(np.float64)
+            if len(data_array) == len(face_vertex_indices):
+                return data_array.astype(np.float64)
+            raise ValueError(
+                f"Attribute '{attr_name}' has {len(data_array)} values, expected {expected_vertex_count} vertices "
+                f"or {len(face_vertex_indices)} face islands."
+            )
+
+        def expand_attribute_values(logical_values, raw_length, face_vertex_indices, expected_vertex_count, attr_name):
+            """Expand logical splat values back to the attribute storage domain."""
+            logical_values = np.asarray(logical_values, dtype=np.float64)
+            if face_vertex_indices is None:
+                if len(logical_values) != raw_length:
+                    raise ValueError(
+                        f"Attribute '{attr_name}' expects {raw_length} values, got {len(logical_values)}."
+                    )
+                return logical_values.astype(np.float32)
+            if raw_length == len(face_vertex_indices):
+                if len(logical_values) != len(face_vertex_indices):
+                    raise ValueError(
+                        f"Attribute '{attr_name}' expects {len(face_vertex_indices)} logical values, got {len(logical_values)}."
+                    )
+                return logical_values.astype(np.float32)
+            if raw_length == expected_vertex_count:
+                if len(logical_values) != len(face_vertex_indices):
+                    raise ValueError(
+                        f"Attribute '{attr_name}' expects {len(face_vertex_indices)} logical values for face expansion, "
+                        f"got {len(logical_values)}."
+                    )
+                expanded = np.empty(expected_vertex_count, dtype=np.float64)
+                expanded[face_vertex_indices] = logical_values[:, None]
+                return expanded.astype(np.float32)
+            raise ValueError(
+                f"Attribute '{attr_name}' has unsupported storage length {raw_length} for face-based expansion."
+            )
+
+        def get_float_attribute_context(obj, attr_name, face_vertex_indices=None, expected_vertex_count=None):
+            attr, raw_values = get_float_attribute(obj, attr_name)
+            if expected_vertex_count is None:
+                expected_vertex_count = len(obj.data.vertices)
+            logical_values = collapse_attribute_values(
+                raw_values,
+                face_vertex_indices,
+                expected_vertex_count,
+                attr_name,
+            )
+            return {
+                "attr": attr,
+                "attr_name": attr_name,
+                "raw_length": len(raw_values),
+                "logical_values": logical_values,
+            }
+
+        def set_attribute_context_values(context, logical_values, face_vertex_indices=None, expected_vertex_count=None):
+            if expected_vertex_count is None:
+                raise ValueError("expected_vertex_count is required when writing attribute values.")
+            values = expand_attribute_values(
+                logical_values,
+                context["raw_length"],
+                face_vertex_indices,
+                expected_vertex_count,
+                context["attr_name"],
+            )
+            context["attr"].data.foreach_set("value", values)
+
+        def get_rotation_attribute_data(obj, face_vertex_indices=None, expected_vertex_count=None):
+            attrs = []
+            values = []
+            for attr_name in ROTATION_ATTRIBUTES:
+                attr_context = get_float_attribute_context(
+                    obj,
+                    attr_name,
+                    face_vertex_indices=face_vertex_indices,
+                    expected_vertex_count=expected_vertex_count,
+                )
+                attrs.append(attr_context)
+                values.append(attr_context["logical_values"])
+            quaternions = np.stack(values, axis=1)
+            norms = np.linalg.norm(quaternions, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-12)
+            quaternions /= norms
+            return attrs, quaternions
+
+        def get_scale_attribute_data(obj, face_vertex_indices=None, expected_vertex_count=None):
+            attrs = []
+            values = []
+            for attr_name in SCALE_ATTRIBUTES:
+                attr_context = get_float_attribute_context(
+                    obj,
+                    attr_name,
+                    face_vertex_indices=face_vertex_indices,
+                    expected_vertex_count=expected_vertex_count,
+                )
+                attrs.append(attr_context)
+                values.append(attr_context["logical_values"])
+            log_scales = np.stack(values, axis=1)
+            return attrs, log_scales
+
+        def quaternions_to_rotation_matrices(quaternions):
+            w = quaternions[:, 0]
+            x = quaternions[:, 1]
+            y = quaternions[:, 2]
+            z = quaternions[:, 3]
+            xx = x * x
+            yy = y * y
+            zz = z * z
+            xy = x * y
+            xz = x * z
+            yz = y * z
+            wx = w * x
+            wy = w * y
+            wz = w * z
+            matrices = np.empty((len(quaternions), 3, 3), dtype=np.float64)
+            matrices[:, 0, 0] = 1.0 - 2.0 * (yy + zz)
+            matrices[:, 0, 1] = 2.0 * (xy - wz)
+            matrices[:, 0, 2] = 2.0 * (xz + wy)
+            matrices[:, 1, 0] = 2.0 * (xy + wz)
+            matrices[:, 1, 1] = 1.0 - 2.0 * (xx + zz)
+            matrices[:, 1, 2] = 2.0 * (yz - wx)
+            matrices[:, 2, 0] = 2.0 * (xz - wy)
+            matrices[:, 2, 1] = 2.0 * (yz + wx)
+            matrices[:, 2, 2] = 1.0 - 2.0 * (xx + yy)
+            return matrices
+
+        def rotation_matrices_to_quaternions(matrices):
+            quaternions = np.zeros((len(matrices), 4), dtype=np.float64)
+            trace = matrices[:, 0, 0] + matrices[:, 1, 1] + matrices[:, 2, 2]
+            mask = trace > 0.0
+            if np.any(mask):
+                s = np.sqrt(trace[mask] + 1.0) * 2.0
+                quaternions[mask, 0] = 0.25 * s
+                quaternions[mask, 1] = (matrices[mask, 2, 1] - matrices[mask, 1, 2]) / s
+                quaternions[mask, 2] = (matrices[mask, 0, 2] - matrices[mask, 2, 0]) / s
+                quaternions[mask, 3] = (matrices[mask, 1, 0] - matrices[mask, 0, 1]) / s
+            mask_x = (~mask) & (matrices[:, 0, 0] > matrices[:, 1, 1]) & (matrices[:, 0, 0] > matrices[:, 2, 2])
+            if np.any(mask_x):
+                s = np.sqrt(1.0 + matrices[mask_x, 0, 0] - matrices[mask_x, 1, 1] - matrices[mask_x, 2, 2]) * 2.0
+                quaternions[mask_x, 0] = (matrices[mask_x, 2, 1] - matrices[mask_x, 1, 2]) / s
+                quaternions[mask_x, 1] = 0.25 * s
+                quaternions[mask_x, 2] = (matrices[mask_x, 0, 1] + matrices[mask_x, 1, 0]) / s
+                quaternions[mask_x, 3] = (matrices[mask_x, 0, 2] + matrices[mask_x, 2, 0]) / s
+            mask_y = (~mask) & (~mask_x) & (matrices[:, 1, 1] > matrices[:, 2, 2])
+            if np.any(mask_y):
+                s = np.sqrt(1.0 + matrices[mask_y, 1, 1] - matrices[mask_y, 0, 0] - matrices[mask_y, 2, 2]) * 2.0
+                quaternions[mask_y, 0] = (matrices[mask_y, 0, 2] - matrices[mask_y, 2, 0]) / s
+                quaternions[mask_y, 1] = (matrices[mask_y, 0, 1] + matrices[mask_y, 1, 0]) / s
+                quaternions[mask_y, 2] = 0.25 * s
+                quaternions[mask_y, 3] = (matrices[mask_y, 1, 2] + matrices[mask_y, 2, 1]) / s
+            mask_z = (~mask) & (~mask_x) & (~mask_y)
+            if np.any(mask_z):
+                s = np.sqrt(1.0 + matrices[mask_z, 2, 2] - matrices[mask_z, 0, 0] - matrices[mask_z, 1, 1]) * 2.0
+                quaternions[mask_z, 0] = (matrices[mask_z, 1, 0] - matrices[mask_z, 0, 1]) / s
+                quaternions[mask_z, 1] = (matrices[mask_z, 0, 2] + matrices[mask_z, 2, 0]) / s
+                quaternions[mask_z, 2] = (matrices[mask_z, 1, 2] + matrices[mask_z, 2, 1]) / s
+                quaternions[mask_z, 3] = 0.25 * s
+            norms = np.linalg.norm(quaternions, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-12)
+            quaternions /= norms
+            negative_w = quaternions[:, 0] < 0.0
+            quaternions[negative_w] *= -1.0
+            return quaternions
+
+        def get_object_linear_transform(obj):
+            linear_transform = np.array(obj.matrix_basis.to_3x3(), dtype=np.float64)
+            _, rotation_quat, _ = obj.matrix_basis.decompose()
+            rotation_matrix = np.array(rotation_quat.to_matrix(), dtype=np.float64)
+            return linear_transform, rotation_matrix, rotation_quat
+
+        def bake_scale_and_rotation_attributes(obj, linear_transform, face_vertex_indices=None, expected_vertex_count=None):
+            rotation_attrs, quaternions = get_rotation_attribute_data(
+                obj,
+                face_vertex_indices=face_vertex_indices,
+                expected_vertex_count=expected_vertex_count,
+            )
+            scale_attrs, log_scales = get_scale_attribute_data(
+                obj,
+                face_vertex_indices=face_vertex_indices,
+                expected_vertex_count=expected_vertex_count,
+            )
+            scales = np.exp(log_scales)
+            rotation_mats = quaternions_to_rotation_matrices(quaternions)
+            scale_sq = np.zeros((len(scales), 3, 3), dtype=np.float64)
+            scale_sq[:, 0, 0] = scales[:, 0] ** 2
+            scale_sq[:, 1, 1] = scales[:, 1] ** 2
+            scale_sq[:, 2, 2] = scales[:, 2] ** 2
+            # Standard 3DGS covariance convention: Sigma = R * diag(scale^2) * R^T
+            covariances = np.matmul(rotation_mats, np.matmul(scale_sq, np.transpose(rotation_mats, (0, 2, 1))))
+            transformed_covariances = np.matmul(
+                linear_transform[None, :, :],
+                np.matmul(covariances, linear_transform.T[None, :, :]),
+            )
+            eigenvalues, eigenvectors = np.linalg.eigh(transformed_covariances)
+            order = np.argsort(eigenvalues, axis=1)[:, ::-1]
+            sorted_values = np.take_along_axis(eigenvalues, order, axis=1)
+            sorted_vectors = np.take_along_axis(eigenvectors, order[:, None, :], axis=2)
+            dets = np.linalg.det(sorted_vectors)
+            flip_mask = dets < 0.0
+            sorted_vectors[flip_mask, :, 2] *= -1.0
+            new_quaternions = rotation_matrices_to_quaternions(sorted_vectors)
+            new_scales = np.sqrt(np.maximum(sorted_values, 1e-20))
+            new_log_scales = np.log(new_scales)
+            for attr_index, attr_context in enumerate(rotation_attrs):
+                set_attribute_context_values(
+                    attr_context,
+                    new_quaternions[:, attr_index],
+                    face_vertex_indices=face_vertex_indices,
+                    expected_vertex_count=expected_vertex_count,
+                )
+            for attr_index, attr_context in enumerate(scale_attrs):
+                set_attribute_context_values(
+                    attr_context,
+                    new_log_scales[:, attr_index],
+                    face_vertex_indices=face_vertex_indices,
+                    expected_vertex_count=expected_vertex_count,
+                )
+            return len(new_quaternions)
+
+        def fibonacci_sphere(sample_count):
+            indices = np.arange(sample_count, dtype=np.float64) + 0.5
+            phi = np.arccos(1.0 - 2.0 * indices / sample_count)
+            theta = math.pi * (1.0 + math.sqrt(5.0)) * indices
+            x = np.cos(theta) * np.sin(phi)
+            y = np.sin(theta) * np.sin(phi)
+            z = np.cos(phi)
+            return np.stack([x, y, z], axis=1)
+
+        def evaluate_real_sh_basis(directions):
+            x = directions[:, 0]
+            y = directions[:, 1]
+            z = directions[:, 2]
+            xx = x * x
+            yy = y * y
+            zz = z * z
+            xy = x * y
+            yz = y * z
+            xz = x * z
+            basis = np.empty((len(directions), 16), dtype=np.float64)
+            basis[:, 0] = SH_C0
+            basis[:, 1] = -SH_C1 * y
+            basis[:, 2] = SH_C1 * z
+            basis[:, 3] = -SH_C1 * x
+            basis[:, 4] = SH_C2_0 * xy
+            basis[:, 5] = SH_C2_1 * yz
+            basis[:, 6] = SH_C2_2 * (2.0 * zz - xx - yy)
+            basis[:, 7] = SH_C2_3 * xz
+            basis[:, 8] = SH_C2_4 * (xx - yy)
+            basis[:, 9] = SH_C3_0 * y * (3.0 * xx - yy)
+            basis[:, 10] = SH_C3_1 * xy * z
+            basis[:, 11] = SH_C3_2 * y * (4.0 * zz - xx - yy)
+            basis[:, 12] = SH_C3_3 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy)
+            basis[:, 13] = SH_C3_4 * x * (4.0 * zz - xx - yy)
+            basis[:, 14] = SH_C3_5 * z * (xx - yy)
+            basis[:, 15] = SH_C3_6 * x * (xx - 3.0 * yy)
+            return basis
+
+        def build_sh_rotation_matrix(rotation_matrix, sh_degree):
+            total_coeffs = (sh_degree + 1) ** 2
+            if total_coeffs == 1:
+                return np.eye(1, dtype=np.float64)
+            sample_dirs = fibonacci_sphere(256)
+            rotated_dirs = sample_dirs @ rotation_matrix
+            full_basis = evaluate_real_sh_basis(sample_dirs)
+            rotated_basis = evaluate_real_sh_basis(rotated_dirs)
+            rotation_matrix_full = np.zeros((total_coeffs, total_coeffs), dtype=np.float64)
+            rotation_matrix_full[0, 0] = 1.0
+            degree_offsets = {
+                1: (1, 4),
+                2: (4, 9),
+                3: (9, 16),
+            }
+            for degree in range(1, sh_degree + 1):
+                start, end = degree_offsets[degree]
+                basis_block = full_basis[:, start:end]
+                rotated_block = rotated_basis[:, start:end]
+                solved_block, _, _, _ = np.linalg.lstsq(basis_block, rotated_block, rcond=None)
+                rotation_matrix_full[start:end, start:end] = solved_block
+            return rotation_matrix_full
+
+        def get_sh_attribute_layout(obj, face_vertex_indices=None, expected_vertex_count=None):
+            dc_attrs = []
+            for attr_name in DC_ATTRIBUTES:
+                attr_context = get_float_attribute_context(
+                    obj,
+                    attr_name,
+                    face_vertex_indices=face_vertex_indices,
+                    expected_vertex_count=expected_vertex_count,
+                )
+                dc_attrs.append(attr_context)
+            f_rest_fields = [attr.name for attr in obj.data.attributes if attr.name.startswith("f_rest_")]
+            f_rest_fields = sorted(f_rest_fields, key=lambda name: int(name.split("_")[-1]))
+            if not f_rest_fields:
+                return None, 0
+            if len(f_rest_fields) % 3 != 0:
+                raise ValueError("f_rest attributes are incomplete. Expected 3 matching channels.")
+            coeffs_per_channel = 1 + (len(f_rest_fields) // 3)
+            if coeffs_per_channel not in SUPPORTED_SH_COEFFS:
+                raise ValueError(
+                    f"Unsupported SH layout on '{obj.name}'. Found {coeffs_per_channel} coeffs per channel."
+                )
+            channel_rest_count = coeffs_per_channel - 1
+            channel_attrs = []
+            for channel_index in range(3):
+                attrs = []
+                values = []
+                dc_context = dc_attrs[channel_index]
+                attrs.append(dc_context)
+                values.append(dc_context["logical_values"])
+                start = channel_index * channel_rest_count
+                end = start + channel_rest_count
+                for attr_name in f_rest_fields[start:end]:
+                    attr_context = get_float_attribute_context(
+                        obj,
+                        attr_name,
+                        face_vertex_indices=face_vertex_indices,
+                        expected_vertex_count=expected_vertex_count,
+                    )
+                    attrs.append(attr_context)
+                    values.append(attr_context["logical_values"])
+                channel_attrs.append((attrs, np.stack(values, axis=1)))
+            sh_degree = SUPPORTED_SH_COEFFS[coeffs_per_channel]
+            return channel_attrs, sh_degree
+
+        def bake_sh_attributes(obj, rotation_matrix, face_vertex_indices=None, expected_vertex_count=None):
+            channel_data, sh_degree = get_sh_attribute_layout(
+                obj,
+                face_vertex_indices=face_vertex_indices,
+                expected_vertex_count=expected_vertex_count,
+            )
+            if sh_degree == 0:
+                return 0
+            sh_rotation = build_sh_rotation_matrix(rotation_matrix, sh_degree)
+            for attrs, coeffs in channel_data:
+                rotated_coeffs = coeffs @ sh_rotation.T
+                for attr_index, attr_context in enumerate(attrs):
+                    set_attribute_context_values(
+                        attr_context,
+                        rotated_coeffs[:, attr_index],
+                        face_vertex_indices=face_vertex_indices,
+                        expected_vertex_count=expected_vertex_count,
+                    )
+            return sh_degree
+
+        def apply_object_rotation_and_scale(obj):
+            original_mode = obj.mode
+            view_layer = bpy.context.view_layer
+            original_active = view_layer.objects.active
+            originally_selected = list(bpy.context.selected_objects)
+            try:
+                if original_mode != "OBJECT":
+                    bpy.ops.object.mode_set(mode="OBJECT")
+                for selected_obj in originally_selected:
+                    selected_obj.select_set(False)
+                obj.select_set(True)
+                view_layer.objects.active = obj
+                bpy.ops.object.transform_apply(
+                    location=False,
+                    rotation=True,
+                    scale=True,
+                )
+            finally:
+                obj.select_set(False)
+                for selected_obj in originally_selected:
+                    if selected_obj and selected_obj.name in bpy.data.objects:
+                        selected_obj.select_set(True)
+                if original_active and original_active.name in bpy.data.objects:
+                    view_layer.objects.active = original_active
+                if original_mode != "OBJECT":
+                    try:
+                        bpy.ops.object.mode_set(mode=original_mode)
+                    except Exception:
+                        pass
+
+        def main():
+            obj = get_target_mesh_object(target_obj_name)
+            expected_vertex_count = len(obj.data.vertices)
+            face_vertex_indices = get_face_quad_vertex_groups(obj.data)
+            if face_vertex_indices is not None:
+                print(
+                    f"Detected face-based gaussian mesh '{obj.name}', collapsing "
+                    f"{expected_vertex_count:,} quad vertices to {len(face_vertex_indices):,} logical splats for transform bake."
+                )
+            linear_transform, rotation_matrix, rotation_quat = get_object_linear_transform(obj)
+            splat_count = bake_scale_and_rotation_attributes(
+                obj,
+                linear_transform,
+                face_vertex_indices=face_vertex_indices,
+                expected_vertex_count=expected_vertex_count,
+            )
+            sh_degree = bake_sh_attributes(
+                obj,
+                rotation_matrix,
+                face_vertex_indices=face_vertex_indices,
+                expected_vertex_count=expected_vertex_count,
+            )
+            apply_object_rotation_and_scale(obj)
+            print(f"Baked scale/rotation into {splat_count:,} splats on '{obj.name}'.")
+            if sh_degree > 0:
+                print(f"Rotated SH attributes up to degree {sh_degree}.")
+            else:
+                print("No higher SH attributes found to rotate.")
+            print(
+                "Applied object rotation/scale to mesh and reset object transforms "
+                f"(object rotation quaternion was {rotation_quat.w:.6f}, {rotation_quat.x:.6f}, "
+                f"{rotation_quat.y:.6f}, {rotation_quat.z:.6f})."
+            )
+            print("3DGS transform bake completed.")
+        main()
+        bpy.ops.object.transform_apply('INVOKE_DEFAULT', location=True)
+        if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Render_GN' in bpy.context.view_layer.objects.active.modifiers):
+            bpy.context.view_layer.objects.active.modifiers.remove(modifier=bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN'], )
+        bpy.context.view_layer.objects.active['3DGS_Mesh_Type'] = 'face'
+        sna_append_and_add_geo_nodes_function_execute_6BCD7('KIRI_3DGS_Render_To_Faces_GN', 'KIRI_3DGS_Render_GN', bpy.context.view_layer.objects.active)
+        sna_align_active_values_to_x_4CE1F()
+        sna_move_modifier_index_23126(bpy.context.view_layer.objects.active, 'KIRI_3DGS_Render_GN', 0)
+        bpy.ops.object.modifier_apply('INVOKE_DEFAULT', modifier='KIRI_3DGS_Render_GN')
+        sna_append_and_add_geo_nodes_function_execute_6BCD7('KIRI_3DGS_Render_GN', 'KIRI_3DGS_Render_GN', bpy.context.view_layer.objects.active)
+        sna_move_modifier_index_23126(bpy.context.view_layer.objects.active, 'KIRI_3DGS_Render_GN', 0)
+        if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Render_GN' in bpy.context.view_layer.objects.active.modifiers):
+            bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN'].show_in_editmode = True
+            bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN'].show_on_cage = True
+        import numpy as np
+        # Constants from your script
+        SH_0 = 0.28209479177387814
         # Get the active object
         obj = bpy.context.active_object
-        if not obj:
-            print("No active object found.")
+        if not obj or obj.type != 'MESH':
+            print("Error: No active mesh object selected.")
         else:
-            print(f"Processing 3DGS transformations for object: {obj.name}")
-            # Get current object rotation (ensuring quaternion is updated)
-            original_rotation_mode = obj.rotation_mode
-            # If not already in quaternion mode, ensure the quaternion gets updated
-            if original_rotation_mode != 'QUATERNION':
-                # Switch to quaternion mode to ensure quaternion is updated
-                obj.rotation_mode = 'QUATERNION'
-                # Switch back to original mode
-                obj.rotation_mode = original_rotation_mode
-            # Get the quaternion values
-            obj_rotation_quat = obj.rotation_quaternion.copy()
-            # Convert to w, x, y, z format (from Blender's x, y, z, w)
-            blender_quat = [obj_rotation_quat.w, obj_rotation_quat.x, 
-                          obj_rotation_quat.y, obj_rotation_quat.z]
-            if VERBOSE:
-                print(f"Current object rotation quaternion [w,x,y,z]: {blender_quat}")
-            # Get current object scale
-            scale_x, scale_y, scale_z = obj.scale
-            if VERBOSE:
-                print(f"Current object scale: X={scale_x}, Y={scale_y}, Z={scale_z}")
-            # Calculate the logarithm of scale factors
-            log_scale_x = math.log(scale_x) if scale_x > 0 else 0
-            log_scale_y = math.log(scale_y) if scale_y > 0 else 0
-            log_scale_z = math.log(scale_z) if scale_z > 0 else 0
-            log_scale_factors = [log_scale_x, log_scale_y, log_scale_z]
-            if VERBOSE:
-                print(f"Log scale factors: X={log_scale_x}, Y={log_scale_y}, Z={log_scale_z}")
-            # Check if the object has attribute data
-            if not hasattr(obj.data, "attributes"):
-                print("Object does not have attribute data.")
+            # Get the mesh data
+            mesh = obj.data
+            # Check if the required attributes exist
+            if not all(attr.name in mesh.attributes for attr in mesh.attributes if attr.name in ['f_dc_0', 'f_dc_1', 'f_dc_2', 'opacity']):
+                print("Error: Required attributes (f_dc_0, f_dc_1, f_dc_2, opacity) not found on the mesh.")
             else:
-                # Perform transformations in the specified order
-                if TRANSFORM_ORDER == "SCALE_FIRST":
-                    # First update scale attributes
-                    scale_success = update_scale_attributes(obj, SCALE_ATTRIBUTES, log_scale_factors, VERBOSE)
-                    print("Scale attributes update", "succeeded" if scale_success else "failed")
-                    # Then update rotation attributes
-                    rotation_success = update_rotation_attributes(obj, ROTATION_ATTRIBUTES, blender_quat, VERBOSE, NORMALIZE_QUATERNIONS)
-                    print("Rotation attributes update", "succeeded" if rotation_success else "failed")
-                else:  # ROTATION_FIRST
-                    # First update rotation attributes
-                    rotation_success = update_rotation_attributes(obj, ROTATION_ATTRIBUTES, blender_quat, VERBOSE, NORMALIZE_QUATERNIONS)
-                    print("Rotation attributes update", "succeeded" if rotation_success else "failed")
-                    # Then update scale attributes
-                    scale_success = update_scale_attributes(obj, SCALE_ATTRIBUTES, log_scale_factors, VERBOSE)
-                    print("Scale attributes update", "succeeded" if scale_success else "failed")
-                # Apply transformations to reset object transforms
-                apply_transformations(obj, APPLY_ROTATION, APPLY_SCALE)
-                print("\nTransformation operations completed.")
+                # Get the number of points (vertices)
+                point_count = len(mesh.vertices)
+                expected_length = point_count * 4  # Each point has 1 RGBA set (4 values) for both Col and KIRI_3DGS_Paint
+                # Extract data from attributes (assuming they are on POINT domain)
+                f_dc_0_data = np.array([v.value for v in mesh.attributes['f_dc_0'].data])
+                f_dc_1_data = np.array([v.value for v in mesh.attributes['f_dc_1'].data])
+                f_dc_2_data = np.array([v.value for v in mesh.attributes['f_dc_2'].data])
+                opacity_data = np.array([v.value for v in mesh.attributes['opacity'].data])
+                # Debug: Check lengths of input attribute data
+                print(f"Number of points (vertices): {point_count}")
+                print(f"Length of f_dc_0_data: {len(f_dc_0_data)}")
+                print(f"Length of f_dc_1_data: {len(f_dc_1_data)}")
+                print(f"Length of f_dc_2_data: {len(f_dc_2_data)}")
+                print(f"Length of opacity_data: {len(opacity_data)}")
+                # Verify that attribute data lengths match the number of points
+                if not (len(f_dc_0_data) == len(f_dc_1_data) == len(f_dc_2_data) == len(opacity_data) == point_count):
+                    print("Error: Mismatch in attribute data lengths. Expected length matches point_count.")
+                else:
+                    # Calculate RGB and Alpha for each point (same calculation for both Col and KIRI_3DGS_Paint)
+                    color_data = []  # For both Col and KIRI_3DGS_Paint, one RGBA per point
+                    for i in range(point_count):
+                        # Calculate RGB (matching your script)
+                        R = (f_dc_0_data[i] * SH_0 + 0.5)
+                        G = (f_dc_1_data[i] * SH_0 + 0.5)
+                        B = (f_dc_2_data[i] * SH_0 + 0.5)
+                        # Calculate Alpha (using sigmoid if opacity is in log-space, or raw if [0, 1])
+                        # Here, we assume opacity is in log-space (logits) as in your script
+                        log_opacity = opacity_data[i]
+                        A = 1 / (1 + np.exp(-log_opacity))
+                        # Ensure values are in [0, 1]
+                        R = max(0.0, min(1.0, R))
+                        G = max(0.0, min(1.0, G))
+                        B = max(0.0, min(1.0, B))
+                        A = max(0.0, min(1.0, A))
+                        # Add RGBA for both Col and KIRI_3DGS_Paint (one set per point)
+                        color_data.extend([R, G, B, A])
+                    # Debug: Check calculated data length
+                    print(f"Length of color_data (Col and KIRI_3DGS_Paint): {len(color_data)}")
+                    print(f"Expected length for POINT domain: {expected_length}")
+                    # Verify data length matches expectation
+                    if len(color_data) != expected_length:
+                        print(f"Error: Array length mismatch (expected {expected_length}, got {len(color_data)})")
+                    else:
+                        # Create or update the Col attribute on the point domain
+                        if 'Col' in mesh.attributes:
+                            mesh.attributes.remove(mesh.attributes['Col'])
+                        col_attr = mesh.attributes.new(name="Col", type='FLOAT_COLOR', domain='POINT')
+                        col_attr.data.foreach_set("color", color_data)
+                        # Create or update the KIRI_3DGS_Paint attribute on the point domain
+                        if 'KIRI_3DGS_Paint' in mesh.attributes:
+                            mesh.attributes.remove(mesh.attributes['KIRI_3DGS_Paint'])
+                        paint_attr = mesh.attributes.new(name="KIRI_3DGS_Paint", type='FLOAT_COLOR', domain='POINT')
+                        paint_attr.data.foreach_set("color", color_data)
+                        # Set KIRI_3DGS_Paint as the active color attribute
+                        mesh.color_attributes.active_color = paint_attr
+                        print(f"Created Col attribute on {obj.name} with {point_count} points.")
+                        print(f"Created KIRI_3DGS_Paint attribute on {obj.name} with {point_count} color values on the POINT domain.")
+        if property_exists("bpy.data.materials['KIRI_3DGS_Render_Material']", globals(), locals()):
+            pass
+        else:
+            before_data = list(bpy.data.materials)
+            bpy.ops.wm.append(directory=os.path.join(os.path.dirname(__file__), 'assets', '3DGS Render APPEND V5.blend') + r'\Material', filename='KIRI_3DGS_Render_Material', link=False)
+            new_data = list(filter(lambda d: not d in before_data, list(bpy.data.materials)))
+            appended_79374 = None if not new_data else new_data[0]
+        bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Sorter_GN'].show_viewport = (bpy.data.materials['KIRI_3DGS_Render_Material'].surface_render_method == 'BLENDED')
+        bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Sorter_GN'].show_render = (bpy.data.materials['KIRI_3DGS_Render_Material'].surface_render_method == 'BLENDED')
+        input_object = bpy.context.view_layer.objects.active
+        material_name = 'KIRI_3DGS_Render_Material'
+        # Input Variable Names
+        #input_object = None  # Should be set to a bpy.types.Object pointer before running
+        #material_name = "KIRI_3DGS_Render_Material"  # Name of the material to assign
+        # Check if the input object is provided and is valid
+        if not input_object or input_object.type != 'MESH':
+            print("Error: No valid mesh object provided as input.")
+        else:
+            # Get the object and its mesh data
+            obj = input_object
+            mesh = obj.data
+            try:
+                # Remove all existing material slots
+                while len(obj.material_slots) > 0:
+                    bpy.context.object.active_material_index = 0  # Set to the first slot to remove
+                    bpy.ops.object.material_slot_remove()
+                # Check if the material exists; create it if it doesn’t
+                if material_name not in bpy.data.materials:
+                    new_material = bpy.data.materials.new(name=material_name)
+                    new_material.use_nodes = True  # Enable node-based shading (optional, matching your original script)
+                else:
+                    new_material = bpy.data.materials[material_name]
+                # Add the material to the object as a new slot
+                obj.data.materials.append(new_material)
+                print(f"Assigned material '{material_name}' to {obj.name} and removed existing material slots.")
+            except Exception as e:
+                print(f"Error assigning material to {obj.name}: {e}")
+        bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN']['Socket_61'] = bpy.data.materials['KIRI_3DGS_Render_Material']
+        bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN']['Socket_54'] = bpy.context.view_layer.objects.active.sna_dgs_object_properties.cam_update
+        bpy.context.view_layer.objects.active.update_tag(refresh={'DATA'}, )
+        if bpy.context and bpy.context.screen:
+            for a in bpy.context.screen.areas:
+                a.tag_redraw()
         return {"FINISHED"}
 
     def invoke(self, context, event):
@@ -1606,18 +3086,8 @@ def sna_selective_adjustment_1_function_interface_AD57C(layout_function, ):
         col_29C70.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Adjust_Colour_And_Material'], attr_6C86C, text='', icon_value=0, emboss=True, toggle=True)
         attr_1D6B4 = '["' + str('Socket_34' + '"]') 
         col_29C70.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Adjust_Colour_And_Material'], attr_1D6B4, text='', icon_value=0, emboss=True, toggle=True)
-    box_C9715 = col_B3736.box()
-    box_C9715.alert = False
-    box_C9715.enabled = True
-    box_C9715.active = True
-    box_C9715.use_property_split = False
-    box_C9715.use_property_decorate = False
-    box_C9715.alignment = 'Expand'.upper()
-    box_C9715.scale_x = 1.0
-    box_C9715.scale_y = 1.0
-    if not True: box_C9715.operator_context = "EXEC_DEFAULT"
-    op = box_C9715.operator('sna.dgs_render_append_wire_sphere_2bf63', text='Add Wire Sphere', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'noun-sphere-7915480-FFFFFF.svg')), emboss=True, depress=False)
-    op = box_C9715.operator('sna.dgs_render_append_wire_cube_56e0f', text='Add Wire Cube', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'noun-cube-7915485-FFFFFF.svg')), emboss=True, depress=False)
+    layout_function = col_B3736
+    sna_append_wire_effectors_D3038(layout_function, )
 
 
 def sna_selective_adjustment_2_function_interface_4A09B(layout_function, ):
@@ -1714,18 +3184,8 @@ def sna_selective_adjustment_2_function_interface_4A09B(layout_function, ):
         col_25741.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Adjust_Colour_And_Material'], attr_0F906, text='', icon_value=0, emboss=True, toggle=True)
         attr_9AC49 = '["' + str('Socket_45' + '"]') 
         col_25741.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Adjust_Colour_And_Material'], attr_9AC49, text='', icon_value=0, emboss=True, toggle=True)
-    box_D2552 = col_1ACBE.box()
-    box_D2552.alert = False
-    box_D2552.enabled = True
-    box_D2552.active = True
-    box_D2552.use_property_split = False
-    box_D2552.use_property_decorate = False
-    box_D2552.alignment = 'Expand'.upper()
-    box_D2552.scale_x = 1.0
-    box_D2552.scale_y = 1.0
-    if not True: box_D2552.operator_context = "EXEC_DEFAULT"
-    op = box_D2552.operator('sna.dgs_render_append_wire_sphere_2bf63', text='Add Wire Sphere', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'noun-sphere-7915480-FFFFFF.svg')), emboss=True, depress=False)
-    op = box_D2552.operator('sna.dgs_render_append_wire_cube_56e0f', text='Add Wire Cube', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'noun-cube-7915485-FFFFFF.svg')), emboss=True, depress=False)
+    layout_function = col_1ACBE
+    sna_append_wire_effectors_D3038(layout_function, )
 
 
 def sna_selective_adjustment_3_function_interface_69C53(layout_function, ):
@@ -1822,18 +3282,8 @@ def sna_selective_adjustment_3_function_interface_69C53(layout_function, ):
         col_E9291.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Adjust_Colour_And_Material'], attr_3DC41, text='', icon_value=0, emboss=True, toggle=True)
         attr_020BD = '["' + str('Socket_51' + '"]') 
         col_E9291.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Adjust_Colour_And_Material'], attr_020BD, text='', icon_value=0, emboss=True, toggle=True)
-    box_008E7 = col_E631B.box()
-    box_008E7.alert = False
-    box_008E7.enabled = True
-    box_008E7.active = True
-    box_008E7.use_property_split = False
-    box_008E7.use_property_decorate = False
-    box_008E7.alignment = 'Expand'.upper()
-    box_008E7.scale_x = 1.0
-    box_008E7.scale_y = 1.0
-    if not True: box_008E7.operator_context = "EXEC_DEFAULT"
-    op = box_008E7.operator('sna.dgs_render_append_wire_sphere_2bf63', text='Add Wire Sphere', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'noun-sphere-7915480-FFFFFF.svg')), emboss=True, depress=False)
-    op = box_008E7.operator('sna.dgs_render_append_wire_cube_56e0f', text='Add Wire Cube', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'noun-cube-7915485-FFFFFF.svg')), emboss=True, depress=False)
+    layout_function = col_E631B
+    sna_append_wire_effectors_D3038(layout_function, )
 
 
 def sna_image_overlay_function_interface_64796(layout_function, ):
@@ -1971,34 +3421,25 @@ def sna_image_overlay_function_interface_64796(layout_function, ):
         col_D2C3C.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Adjust_Colour_And_Material'], attr_67BF4, text='', icon_value=0, emboss=True, toggle=True)
         attr_9154D = '["' + str('Socket_69' + '"]') 
         col_D2C3C.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Adjust_Colour_And_Material'], attr_9154D, text='', icon_value=0, emboss=True, toggle=True)
-    box_A11BE = col_FC5C4.box()
-    box_A11BE.alert = False
-    box_A11BE.enabled = True
-    box_A11BE.active = True
-    box_A11BE.use_property_split = False
-    box_A11BE.use_property_decorate = False
-    box_A11BE.alignment = 'Expand'.upper()
-    box_A11BE.scale_x = 1.0
-    box_A11BE.scale_y = 1.0
-    if not True: box_A11BE.operator_context = "EXEC_DEFAULT"
-    op = box_A11BE.operator('sna.dgs_render_append_wire_sphere_2bf63', text='Add Wire Sphere', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'noun-sphere-7915480-FFFFFF.svg')), emboss=True, depress=False)
-    op = box_A11BE.operator('sna.dgs_render_append_wire_cube_56e0f', text='Add Wire Cube', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'noun-cube-7915485-FFFFFF.svg')), emboss=True, depress=False)
+    layout_function = col_FC5C4
+    sna_append_wire_effectors_D3038(layout_function, )
 
 
 def sna_vertex_paint_function_interface_BEA3E(layout_function, ):
     if (bpy.context.view_layer.objects.active['3DGS_Mesh_Type'] == 'vert'):
-        box_07727 = layout_function.box()
-        box_07727.alert = False
-        box_07727.enabled = True
-        box_07727.active = True
-        box_07727.use_property_split = False
-        box_07727.use_property_decorate = False
-        box_07727.alignment = 'Expand'.upper()
-        box_07727.scale_x = 1.0
-        box_07727.scale_y = 1.0
-        if not True: box_07727.operator_context = "EXEC_DEFAULT"
-        box_07727.label(text='Vertex Paint is not available to objects', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
-        box_07727.label(text="imported as 'Verts'", icon_value=0)
+        box_2FB04 = layout_function.box()
+        box_2FB04.alert = True
+        box_2FB04.enabled = True
+        box_2FB04.active = True
+        box_2FB04.use_property_split = False
+        box_2FB04.use_property_decorate = False
+        box_2FB04.alignment = 'Expand'.upper()
+        box_2FB04.scale_x = 1.0
+        box_2FB04.scale_y = 1.0
+        if not True: box_2FB04.operator_context = "EXEC_DEFAULT"
+        box_2FB04.label(text='Painting is only available for Face based', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+        box_2FB04.label(text='3DGS objects. You can convert this object', icon_value=0)
+        box_2FB04.label(text='from the Ctrl+A menu', icon_value=0)
     col_453E1 = layout_function.column(heading='', align=False)
     col_453E1.alert = False
     col_453E1.enabled = (not (bpy.context.view_layer.objects.active['3DGS_Mesh_Type'] == 'vert'))
@@ -2048,7 +3489,7 @@ def sna_vertex_paint_function_interface_BEA3E(layout_function, ):
         box_ACBF2.scale_x = 1.0
         box_ACBF2.scale_y = 1.0
         if not True: box_ACBF2.operator_context = "EXEC_DEFAULT"
-        box_ACBF2.label(text='KIRI_3DGS_Paint attribute is missing', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
+        box_ACBF2.label(text='KIRI_3DGS_Paint attribute is missing', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
     op = box_2E9CF.operator('sna.dgs_render_refresh__create_paint_attribute_84655', text='Reset Paint', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'update.svg')), emboss=True, depress=False)
     box_7E936 = col_86FB7.box()
     box_7E936.alert = False
@@ -2093,18 +3534,8 @@ def sna_vertex_paint_function_interface_BEA3E(layout_function, ):
         col_DC970.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Adjust_Colour_And_Material'], attr_7340F, text='', icon_value=0, emboss=True, toggle=True)
         attr_34BD5 = '["' + str('Socket_66' + '"]') 
         col_DC970.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Adjust_Colour_And_Material'], attr_34BD5, text='', icon_value=0, emboss=True, toggle=True)
-    box_95EA8 = col_86FB7.box()
-    box_95EA8.alert = False
-    box_95EA8.enabled = True
-    box_95EA8.active = True
-    box_95EA8.use_property_split = False
-    box_95EA8.use_property_decorate = False
-    box_95EA8.alignment = 'Expand'.upper()
-    box_95EA8.scale_x = 1.0
-    box_95EA8.scale_y = 1.0
-    if not True: box_95EA8.operator_context = "EXEC_DEFAULT"
-    op = box_95EA8.operator('sna.dgs_render_append_wire_sphere_2bf63', text='Add Wire Sphere', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'noun-sphere-7915480-FFFFFF.svg')), emboss=True, depress=False)
-    op = box_95EA8.operator('sna.dgs_render_append_wire_cube_56e0f', text='Add Wire Cube', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'noun-cube-7915485-FFFFFF.svg')), emboss=True, depress=False)
+    layout_function = col_86FB7
+    sna_append_wire_effectors_D3038(layout_function, )
 
 
 class SNA_OT_Dgs_Render_Import_Image_Overlay_4A457(bpy.types.Operator, ImportHelper):
@@ -2228,205 +3659,260 @@ class SNA_OT_Dgs_Render_Refresh__Create_Paint_Attribute_84655(bpy.types.Operator
         return self.execute(context)
 
 
+def sna_append_wire_effectors_D3038(layout_function, ):
+    box_C9715 = layout_function.box()
+    box_C9715.alert = False
+    box_C9715.enabled = True
+    box_C9715.active = True
+    box_C9715.use_property_split = False
+    box_C9715.use_property_decorate = False
+    box_C9715.alignment = 'Expand'.upper()
+    box_C9715.scale_x = 1.0
+    box_C9715.scale_y = 1.0
+    if not True: box_C9715.operator_context = "EXEC_DEFAULT"
+    op = box_C9715.operator('sna.dgs_render_append_wire_sphere_2bf63', text='Add Wire Sphere', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'noun-sphere-7915480-FFFFFF.svg')), emboss=True, depress=False)
+    op = box_C9715.operator('sna.dgs_render_append_wire_cube_56e0f', text='Add Wire Cube', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'noun-cube-7915485-FFFFFF.svg')), emboss=True, depress=False)
+
+
 def sna_edit_menu_D3299(layout_function, ):
-    if (bpy.context.scene.sna_dgs_scene_properties.active_mode == 'Edit'):
-        box_09ED1 = layout_function.box()
-        box_09ED1.alert = False
-        box_09ED1.enabled = True
-        box_09ED1.active = True
-        box_09ED1.use_property_split = False
-        box_09ED1.use_property_decorate = False
-        box_09ED1.alignment = 'Expand'.upper()
-        box_09ED1.scale_x = 1.0
-        box_09ED1.scale_y = 1.0
-        if not True: box_09ED1.operator_context = "EXEC_DEFAULT"
-        grid_B53F5 = box_09ED1.grid_flow(columns=2, row_major=True, even_columns=False, even_rows=False, align=True)
-        grid_B53F5.enabled = True
-        grid_B53F5.active = True
-        grid_B53F5.use_property_split = False
-        grid_B53F5.use_property_decorate = False
-        grid_B53F5.alignment = 'Expand'.upper()
-        grid_B53F5.scale_x = 1.0
-        grid_B53F5.scale_y = 1.0
-        if not True: grid_B53F5.operator_context = "EXEC_DEFAULT"
-        grid_B53F5.prop(bpy.context.scene.sna_dgs_scene_properties, 'edit_mode_menu', text=bpy.context.scene.sna_dgs_scene_properties.edit_mode_menu, icon_value=0, emboss=True, expand=True)
-    if bpy.context.scene.sna_dgs_scene_properties.edit_mode_menu == "Import":
-        box_456A0 = layout_function.box()
-        box_456A0.alert = False
-        box_456A0.enabled = True
-        box_456A0.active = True
-        box_456A0.use_property_split = False
-        box_456A0.use_property_decorate = False
-        box_456A0.alignment = 'Expand'.upper()
-        box_456A0.scale_x = 1.0
-        box_456A0.scale_y = 1.0
-        if not True: box_456A0.operator_context = "EXEC_DEFAULT"
-        layout_function = box_456A0
-        sna_import_menu_94FB1(layout_function, )
-    elif bpy.context.scene.sna_dgs_scene_properties.edit_mode_menu == "Modifiers":
-        if (bpy.context.view_layer.objects.active == None):
-            box_BCC27 = layout_function.box()
-            box_BCC27.alert = False
-            box_BCC27.enabled = True
-            box_BCC27.active = True
-            box_BCC27.use_property_split = False
-            box_BCC27.use_property_decorate = False
-            box_BCC27.alignment = 'Expand'.upper()
-            box_BCC27.scale_x = 1.0
-            box_BCC27.scale_y = 1.0
-            if not True: box_BCC27.operator_context = "EXEC_DEFAULT"
-            box_BCC27.label(text='No Active Object', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
-        else:
-            box_15E02 = layout_function.box()
-            box_15E02.alert = False
-            box_15E02.enabled = True
-            box_15E02.active = True
-            box_15E02.use_property_split = False
-            box_15E02.use_property_decorate = False
-            box_15E02.alignment = 'Expand'.upper()
-            box_15E02.scale_x = 1.0
-            box_15E02.scale_y = 1.0
-            if not True: box_15E02.operator_context = "EXEC_DEFAULT"
-            layout_function = box_15E02
-            sna_modify_menu_AEA26(layout_function, )
-    elif bpy.context.scene.sna_dgs_scene_properties.edit_mode_menu == "Colour":
-        if (bpy.context.view_layer.objects.active == None):
-            box_7DC02 = layout_function.box()
-            box_7DC02.alert = False
-            box_7DC02.enabled = True
-            box_7DC02.active = True
-            box_7DC02.use_property_split = False
-            box_7DC02.use_property_decorate = False
-            box_7DC02.alignment = 'Expand'.upper()
-            box_7DC02.scale_x = 1.0
-            box_7DC02.scale_y = 1.0
-            if not True: box_7DC02.operator_context = "EXEC_DEFAULT"
-            box_7DC02.label(text='No Active Object', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
-        else:
-            if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Adjust_Colour_And_Material' in bpy.context.view_layer.objects.active.modifiers):
-                box_FB8A4 = layout_function.box()
-                box_FB8A4.alert = False
-                box_FB8A4.enabled = True
-                box_FB8A4.active = True
-                box_FB8A4.use_property_split = False
-                box_FB8A4.use_property_decorate = False
-                box_FB8A4.alignment = 'Expand'.upper()
-                box_FB8A4.scale_x = 1.0
-                box_FB8A4.scale_y = 1.0
-                if not True: box_FB8A4.operator_context = "EXEC_DEFAULT"
-                layout_function = box_FB8A4
-                sna_colour_function_interface_3A6A5(layout_function, )
-            else:
-                box_6F020 = layout_function.box()
-                box_6F020.alert = False
-                box_6F020.enabled = True
-                box_6F020.active = True
-                box_6F020.use_property_split = False
-                box_6F020.use_property_decorate = False
-                box_6F020.alignment = 'Expand'.upper()
-                box_6F020.scale_x = 1.0
-                box_6F020.scale_y = 1.0
-                if not True: box_6F020.operator_context = "EXEC_DEFAULT"
-                box_6F020.label(text='Active Object is missing the ', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
-                box_6F020.label(text='Adjust_Colour_And_Material modifier', icon_value=0)
-    elif bpy.context.scene.sna_dgs_scene_properties.edit_mode_menu == "Animate":
-        if (bpy.context.view_layer.objects.active == None):
-            box_36685 = layout_function.box()
-            box_36685.alert = False
-            box_36685.enabled = True
-            box_36685.active = True
-            box_36685.use_property_split = False
-            box_36685.use_property_decorate = False
-            box_36685.alignment = 'Expand'.upper()
-            box_36685.scale_x = 1.0
-            box_36685.scale_y = 1.0
-            if not True: box_36685.operator_context = "EXEC_DEFAULT"
-            box_36685.label(text='No Active Object', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
-        else:
-            box_2B760 = layout_function.box()
-            box_2B760.alert = False
-            box_2B760.enabled = True
-            box_2B760.active = True
-            box_2B760.use_property_split = False
-            box_2B760.use_property_decorate = False
-            box_2B760.alignment = 'Expand'.upper()
-            box_2B760.scale_x = 1.0
-            box_2B760.scale_y = 1.0
-            if not True: box_2B760.operator_context = "EXEC_DEFAULT"
-            layout_function = box_2B760
-            sna_animate_function_interface_57F9E(layout_function, )
-    elif bpy.context.scene.sna_dgs_scene_properties.edit_mode_menu == "HQ / LQ":
-        box_50BC2 = layout_function.box()
-        box_50BC2.alert = False
-        box_50BC2.enabled = True
-        box_50BC2.active = True
-        box_50BC2.use_property_split = False
-        box_50BC2.use_property_decorate = False
-        box_50BC2.alignment = 'Expand'.upper()
-        box_50BC2.scale_x = 1.0
-        box_50BC2.scale_y = 1.0
-        if not True: box_50BC2.operator_context = "EXEC_DEFAULT"
-        layout_function = box_50BC2
-        sna_hq_mode_function_interface_17C41(layout_function, )
-    elif bpy.context.scene.sna_dgs_scene_properties.edit_mode_menu == "Export":
-        if (bpy.context.view_layer.objects.active == None):
-            box_A093C = layout_function.box()
-            box_A093C.alert = False
-            box_A093C.enabled = True
-            box_A093C.active = True
-            box_A093C.use_property_split = False
-            box_A093C.use_property_decorate = False
-            box_A093C.alignment = 'Expand'.upper()
-            box_A093C.scale_x = 1.0
-            box_A093C.scale_y = 1.0
-            if not True: box_A093C.operator_context = "EXEC_DEFAULT"
-            box_A093C.label(text='No Active Object', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
-        else:
-            if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Write F_DC_And_Merge' in bpy.context.view_layer.objects.active.modifiers):
-                if (len(bpy.context.view_layer.objects.selected) > 1):
-                    box_7DD8C = layout_function.box()
-                    box_7DD8C.alert = False
-                    box_7DD8C.enabled = True
-                    box_7DD8C.active = True
-                    box_7DD8C.use_property_split = False
-                    box_7DD8C.use_property_decorate = False
-                    box_7DD8C.alignment = 'Expand'.upper()
-                    box_7DD8C.scale_x = 1.0
-                    box_7DD8C.scale_y = 1.0
-                    if not True: box_7DD8C.operator_context = "EXEC_DEFAULT"
-                    box_7DD8C.label(text='Only select 1 object for export', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
-                else:
-                    box_3E038 = layout_function.box()
-                    box_3E038.alert = False
-                    box_3E038.enabled = True
-                    box_3E038.active = True
-                    box_3E038.use_property_split = False
-                    box_3E038.use_property_decorate = False
-                    box_3E038.alignment = 'Expand'.upper()
-                    box_3E038.scale_x = 1.0
-                    box_3E038.scale_y = 1.0
-                    if not True: box_3E038.operator_context = "EXEC_DEFAULT"
-                    layout_function = box_3E038
-                    sna_export_3dgs_function_interface_CDF59(layout_function, )
-            else:
-                box_DE950 = layout_function.box()
-                box_DE950.alert = False
-                box_DE950.enabled = True
-                box_DE950.active = True
-                box_DE950.use_property_split = False
-                box_DE950.use_property_decorate = False
-                box_DE950.alignment = 'Expand'.upper()
-                box_DE950.scale_x = 1.0
-                box_DE950.scale_y = 1.0
-                if not True: box_DE950.operator_context = "EXEC_DEFAULT"
-                box_DE950.label(text='The Active Object is missing the', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
-                box_DE950.label(text='Write F_DC_And_Merge modifier', icon_value=0)
+    if 'EDIT_MESH'==bpy.context.mode:
+        layout_function = layout_function
+        sna_edit_select_tools_D0175(layout_function, )
     else:
-        pass
+        col_05CDB = layout_function.column(heading='', align=False)
+        col_05CDB.alert = False
+        col_05CDB.enabled = True
+        col_05CDB.active = True
+        col_05CDB.use_property_split = False
+        col_05CDB.use_property_decorate = False
+        col_05CDB.scale_x = 1.0
+        col_05CDB.scale_y = 1.0
+        col_05CDB.alignment = 'Expand'.upper()
+        col_05CDB.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+        if (bpy.context.scene.sna_dgs_scene_properties.active_mode == 'Edit'):
+            box_09ED1 = col_05CDB.box()
+            box_09ED1.alert = False
+            box_09ED1.enabled = True
+            box_09ED1.active = True
+            box_09ED1.use_property_split = False
+            box_09ED1.use_property_decorate = False
+            box_09ED1.alignment = 'Expand'.upper()
+            box_09ED1.scale_x = 1.0
+            box_09ED1.scale_y = 1.0
+            if not True: box_09ED1.operator_context = "EXEC_DEFAULT"
+            grid_B53F5 = box_09ED1.grid_flow(columns=2, row_major=True, even_columns=False, even_rows=False, align=True)
+            grid_B53F5.enabled = True
+            grid_B53F5.active = True
+            grid_B53F5.use_property_split = False
+            grid_B53F5.use_property_decorate = False
+            grid_B53F5.alignment = 'Expand'.upper()
+            grid_B53F5.scale_x = 1.0
+            grid_B53F5.scale_y = 1.0
+            if not True: grid_B53F5.operator_context = "EXEC_DEFAULT"
+            grid_B53F5.prop(bpy.context.scene.sna_dgs_scene_properties, 'edit_mode_menu', text=bpy.context.scene.sna_dgs_scene_properties.edit_mode_menu, icon_value=0, emboss=True, expand=True)
+        if bpy.context.scene.sna_dgs_scene_properties.edit_mode_menu == "Import":
+            box_456A0 = col_05CDB.box()
+            box_456A0.alert = False
+            box_456A0.enabled = True
+            box_456A0.active = True
+            box_456A0.use_property_split = False
+            box_456A0.use_property_decorate = False
+            box_456A0.alignment = 'Expand'.upper()
+            box_456A0.scale_x = 1.0
+            box_456A0.scale_y = 1.0
+            if not True: box_456A0.operator_context = "EXEC_DEFAULT"
+            layout_function = box_456A0
+            sna_import_menu_94FB1(layout_function, )
+        elif bpy.context.scene.sna_dgs_scene_properties.edit_mode_menu == "Modifiers":
+            if (bpy.context.view_layer.objects.active == None):
+                box_BCC27 = col_05CDB.box()
+                box_BCC27.alert = False
+                box_BCC27.enabled = True
+                box_BCC27.active = True
+                box_BCC27.use_property_split = False
+                box_BCC27.use_property_decorate = False
+                box_BCC27.alignment = 'Expand'.upper()
+                box_BCC27.scale_x = 1.0
+                box_BCC27.scale_y = 1.0
+                if not True: box_BCC27.operator_context = "EXEC_DEFAULT"
+                box_BCC27.label(text='No Active Object', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+            else:
+                box_15E02 = col_05CDB.box()
+                box_15E02.alert = False
+                box_15E02.enabled = True
+                box_15E02.active = True
+                box_15E02.use_property_split = False
+                box_15E02.use_property_decorate = False
+                box_15E02.alignment = 'Expand'.upper()
+                box_15E02.scale_x = 1.0
+                box_15E02.scale_y = 1.0
+                if not True: box_15E02.operator_context = "EXEC_DEFAULT"
+                layout_function = box_15E02
+                sna_modify_menu_AEA26(layout_function, )
+        elif bpy.context.scene.sna_dgs_scene_properties.edit_mode_menu == "Colour":
+            if (bpy.context.view_layer.objects.active == None):
+                box_7DC02 = col_05CDB.box()
+                box_7DC02.alert = False
+                box_7DC02.enabled = True
+                box_7DC02.active = True
+                box_7DC02.use_property_split = False
+                box_7DC02.use_property_decorate = False
+                box_7DC02.alignment = 'Expand'.upper()
+                box_7DC02.scale_x = 1.0
+                box_7DC02.scale_y = 1.0
+                if not True: box_7DC02.operator_context = "EXEC_DEFAULT"
+                box_7DC02.label(text='No Active Object', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+            else:
+                if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Adjust_Colour_And_Material' in bpy.context.view_layer.objects.active.modifiers):
+                    box_FB8A4 = col_05CDB.box()
+                    box_FB8A4.alert = False
+                    box_FB8A4.enabled = True
+                    box_FB8A4.active = True
+                    box_FB8A4.use_property_split = False
+                    box_FB8A4.use_property_decorate = False
+                    box_FB8A4.alignment = 'Expand'.upper()
+                    box_FB8A4.scale_x = 1.0
+                    box_FB8A4.scale_y = 1.0
+                    if not True: box_FB8A4.operator_context = "EXEC_DEFAULT"
+                    layout_function = box_FB8A4
+                    sna_colour_function_interface_3A6A5(layout_function, )
+                else:
+                    box_6F020 = col_05CDB.box()
+                    box_6F020.alert = False
+                    box_6F020.enabled = True
+                    box_6F020.active = True
+                    box_6F020.use_property_split = False
+                    box_6F020.use_property_decorate = False
+                    box_6F020.alignment = 'Expand'.upper()
+                    box_6F020.scale_x = 1.0
+                    box_6F020.scale_y = 1.0
+                    if not True: box_6F020.operator_context = "EXEC_DEFAULT"
+                    box_6F020.label(text='Active Object is missing the ', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+                    box_6F020.label(text='Adjust_Colour_And_Material modifier', icon_value=0)
+        elif bpy.context.scene.sna_dgs_scene_properties.edit_mode_menu == "Animate":
+            if (bpy.context.view_layer.objects.active == None):
+                box_36685 = col_05CDB.box()
+                box_36685.alert = False
+                box_36685.enabled = True
+                box_36685.active = True
+                box_36685.use_property_split = False
+                box_36685.use_property_decorate = False
+                box_36685.alignment = 'Expand'.upper()
+                box_36685.scale_x = 1.0
+                box_36685.scale_y = 1.0
+                if not True: box_36685.operator_context = "EXEC_DEFAULT"
+                box_36685.label(text='No Active Object', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+            else:
+                box_2B760 = col_05CDB.box()
+                box_2B760.alert = False
+                box_2B760.enabled = True
+                box_2B760.active = True
+                box_2B760.use_property_split = False
+                box_2B760.use_property_decorate = False
+                box_2B760.alignment = 'Expand'.upper()
+                box_2B760.scale_x = 1.0
+                box_2B760.scale_y = 1.0
+                if not True: box_2B760.operator_context = "EXEC_DEFAULT"
+                layout_function = box_2B760
+                sna_animate_function_interface_57F9E(layout_function, )
+        elif bpy.context.scene.sna_dgs_scene_properties.edit_mode_menu == "HQ / LQ":
+            box_50BC2 = col_05CDB.box()
+            box_50BC2.alert = False
+            box_50BC2.enabled = True
+            box_50BC2.active = True
+            box_50BC2.use_property_split = False
+            box_50BC2.use_property_decorate = False
+            box_50BC2.alignment = 'Expand'.upper()
+            box_50BC2.scale_x = 1.0
+            box_50BC2.scale_y = 1.0
+            if not True: box_50BC2.operator_context = "EXEC_DEFAULT"
+            layout_function = box_50BC2
+            sna_hq_mode_function_interface_17C41(layout_function, )
+        elif bpy.context.scene.sna_dgs_scene_properties.edit_mode_menu == "Export":
+            if (bpy.context.view_layer.objects.active == None):
+                box_A093C = col_05CDB.box()
+                box_A093C.alert = False
+                box_A093C.enabled = True
+                box_A093C.active = True
+                box_A093C.use_property_split = False
+                box_A093C.use_property_decorate = False
+                box_A093C.alignment = 'Expand'.upper()
+                box_A093C.scale_x = 1.0
+                box_A093C.scale_y = 1.0
+                if not True: box_A093C.operator_context = "EXEC_DEFAULT"
+                box_A093C.label(text='No Active Object', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+            else:
+                if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Write F_DC_And_Merge' in bpy.context.view_layer.objects.active.modifiers):
+                    if (len(bpy.context.view_layer.objects.selected) > 1):
+                        box_7DD8C = col_05CDB.box()
+                        box_7DD8C.alert = False
+                        box_7DD8C.enabled = True
+                        box_7DD8C.active = True
+                        box_7DD8C.use_property_split = False
+                        box_7DD8C.use_property_decorate = False
+                        box_7DD8C.alignment = 'Expand'.upper()
+                        box_7DD8C.scale_x = 1.0
+                        box_7DD8C.scale_y = 1.0
+                        if not True: box_7DD8C.operator_context = "EXEC_DEFAULT"
+                        box_7DD8C.label(text='Only select 1 object for export', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+                    else:
+                        box_3E038 = col_05CDB.box()
+                        box_3E038.alert = False
+                        box_3E038.enabled = True
+                        box_3E038.active = True
+                        box_3E038.use_property_split = False
+                        box_3E038.use_property_decorate = False
+                        box_3E038.alignment = 'Expand'.upper()
+                        box_3E038.scale_x = 1.0
+                        box_3E038.scale_y = 1.0
+                        if not True: box_3E038.operator_context = "EXEC_DEFAULT"
+                        layout_function = box_3E038
+                        sna_export_3dgs_function_interface_CDF59(layout_function, )
+                else:
+                    box_DE950 = col_05CDB.box()
+                    box_DE950.alert = False
+                    box_DE950.enabled = True
+                    box_DE950.active = True
+                    box_DE950.use_property_split = False
+                    box_DE950.use_property_decorate = False
+                    box_DE950.alignment = 'Expand'.upper()
+                    box_DE950.scale_x = 1.0
+                    box_DE950.scale_y = 1.0
+                    if not True: box_DE950.operator_context = "EXEC_DEFAULT"
+                    box_DE950.label(text='The Active Object is missing the', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+                    box_DE950.label(text='Write F_DC_And_Merge modifier', icon_value=0)
+        elif bpy.context.scene.sna_dgs_scene_properties.edit_mode_menu == "Rig":
+            box_D5082 = col_05CDB.box()
+            box_D5082.alert = False
+            box_D5082.enabled = True
+            box_D5082.active = True
+            box_D5082.use_property_split = False
+            box_D5082.use_property_decorate = False
+            box_D5082.alignment = 'Expand'.upper()
+            box_D5082.scale_x = 1.0
+            box_D5082.scale_y = 1.0
+            if not True: box_D5082.operator_context = "EXEC_DEFAULT"
+            layout_function = box_D5082
+            sna_rig_891FC(layout_function, )
+        elif bpy.context.scene.sna_dgs_scene_properties.edit_mode_menu == "Light Bake":
+            box_6F2D7 = col_05CDB.box()
+            box_6F2D7.alert = False
+            box_6F2D7.enabled = True
+            box_6F2D7.active = True
+            box_6F2D7.use_property_split = False
+            box_6F2D7.use_property_decorate = False
+            box_6F2D7.alignment = 'Expand'.upper()
+            box_6F2D7.scale_x = 1.0
+            box_6F2D7.scale_y = 1.0
+            if not True: box_6F2D7.operator_context = "EXEC_DEFAULT"
+            layout_function = box_6F2D7
+            sna_light_bake_8F346(layout_function, )
+        else:
+            pass
 
 
 def sna_export_3dgs_function_interface_CDF59(layout_function, ):
-    if bpy.context.scene.sna_dgs_scene_properties.show_tips:
+    if bpy.context.preferences.addons[__package__].preferences.sna_show_tips:
         box_9553E = layout_function.box()
         box_9553E.alert = False
         box_9553E.enabled = True
@@ -2437,39 +3923,97 @@ def sna_export_3dgs_function_interface_CDF59(layout_function, ):
         box_9553E.scale_x = 1.0
         box_9553E.scale_y = 1.0
         if not True: box_9553E.operator_context = "EXEC_DEFAULT"
-        box_9553E.label(text='If you have applied scale or rotation', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
+        box_9553E.label(text='If you have applied scale or rotation', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
         box_9553E.label(text="using Blender's native Apply Transform,", icon_value=0)
         box_9553E.label(text='3DGS attributes will be corrupted', icon_value=0)
-        box_9553E.label(text='Higher SH attributes are not updated', icon_value=0)
-    box_7E22C = layout_function.box()
-    box_7E22C.alert = False
-    box_7E22C.enabled = True
-    box_7E22C.active = True
-    box_7E22C.use_property_split = False
-    box_7E22C.use_property_decorate = False
-    box_7E22C.alignment = 'Expand'.upper()
-    box_7E22C.scale_x = 1.0
-    box_7E22C.scale_y = 1.0
-    if not True: box_7E22C.operator_context = "EXEC_DEFAULT"
-    op = box_7E22C.operator('sna.dgs_render_apply_3dgs_tranforms_5b665', text='Apply 3DGS Transforms and Colour', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'kiriengine icon.svg')), emboss=True, depress=False)
-    box_E30D3 = layout_function.box()
-    box_E30D3.alert = False
-    box_E30D3.enabled = 'OBJECT'==bpy.context.mode
-    box_E30D3.active = True
-    box_E30D3.use_property_split = False
-    box_E30D3.use_property_decorate = False
-    box_E30D3.alignment = 'Expand'.upper()
-    box_E30D3.scale_x = 1.0
-    box_E30D3.scale_y = 1.0
-    if not True: box_E30D3.operator_context = "EXEC_DEFAULT"
-    op = box_E30D3.operator('sna.dgs_render_export_mesh_object_as_3dgs_ply_ce2f7', text='Export 3DGS', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'export.svg')), emboss=True, depress=False)
+    row_0B94F = layout_function.row(heading='', align=False)
+    row_0B94F.alert = False
+    row_0B94F.enabled = True
+    row_0B94F.active = True
+    row_0B94F.use_property_split = False
+    row_0B94F.use_property_decorate = False
+    row_0B94F.scale_x = 1.0
+    row_0B94F.scale_y = 1.0
+    row_0B94F.alignment = 'Expand'.upper()
+    row_0B94F.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+    row_0B94F.prop(bpy.context.scene.sna_dgs_scene_properties, 'export_single_or_sequence', text=bpy.context.scene.sna_dgs_scene_properties.export_single_or_sequence, icon_value=0, emboss=True, expand=True)
+    col_11CDA = layout_function.column(heading='', align=False)
+    col_11CDA.alert = False
+    col_11CDA.enabled = True
+    col_11CDA.active = True
+    col_11CDA.use_property_split = False
+    col_11CDA.use_property_decorate = False
+    col_11CDA.scale_x = 1.0
+    col_11CDA.scale_y = 1.0
+    col_11CDA.alignment = 'Expand'.upper()
+    col_11CDA.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+    col_11CDA.label(text='Output Directory', icon_value=0)
+    col_11CDA.prop(bpy.context.scene.sna_dgs_scene_properties, 'export_output_path', text='', icon_value=0, emboss=True)
+    if bpy.context.scene.sna_dgs_scene_properties.export_single_or_sequence == "3DGS":
+        layout_function.prop(bpy.context.scene.sna_dgs_scene_properties, 'export_suffix', text='suffix', icon_value=0, emboss=True)
+    elif bpy.context.scene.sna_dgs_scene_properties.export_single_or_sequence == "4DGS":
+        row_1B925 = layout_function.row(heading='', align=False)
+        row_1B925.alert = False
+        row_1B925.enabled = True
+        row_1B925.active = True
+        row_1B925.use_property_split = False
+        row_1B925.use_property_decorate = False
+        row_1B925.scale_x = 1.0
+        row_1B925.scale_y = 1.0
+        row_1B925.alignment = 'Expand'.upper()
+        row_1B925.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+        row_1B925.label(text='Rig Behaviour', icon_value=0)
+        row_1B925.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_render_rig_cache_mode', text='', icon_value=0, emboss=True)
+    else:
+        pass
+    col_AA350 = layout_function.column(heading='', align=False)
+    col_AA350.alert = False
+    col_AA350.enabled = ('OBJECT'==bpy.context.mode and (bpy.context.scene.sna_dgs_scene_properties.export_output_path != ''))
+    col_AA350.active = True
+    col_AA350.use_property_split = False
+    col_AA350.use_property_decorate = False
+    col_AA350.scale_x = 1.0
+    col_AA350.scale_y = 1.0
+    col_AA350.alignment = 'Expand'.upper()
+    col_AA350.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+    if bpy.context.scene.sna_dgs_scene_properties.export_single_or_sequence == "3DGS":
+        col_41DA9 = col_AA350.column(heading='', align=False)
+        col_41DA9.alert = False
+        col_41DA9.enabled = True
+        col_41DA9.active = True
+        col_41DA9.use_property_split = False
+        col_41DA9.use_property_decorate = False
+        col_41DA9.scale_x = 1.0
+        col_41DA9.scale_y = 2.0
+        col_41DA9.alignment = 'Expand'.upper()
+        col_41DA9.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+        op = col_41DA9.operator('sna.dgs_render_export_mesh_as_3dgs4dgs_ce2f7', text='Export 3DGS', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'export.svg')), emboss=True, depress=False)
+        op.sna_send_to_world_centre = False
+    elif bpy.context.scene.sna_dgs_scene_properties.export_single_or_sequence == "4DGS":
+        col_8AE14 = col_AA350.column(heading='', align=False)
+        col_8AE14.alert = False
+        col_8AE14.enabled = True
+        col_8AE14.active = True
+        col_8AE14.use_property_split = False
+        col_8AE14.use_property_decorate = False
+        col_8AE14.scale_x = 1.0
+        col_8AE14.scale_y = 2.0
+        col_8AE14.alignment = 'Expand'.upper()
+        col_8AE14.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+        op = col_8AE14.operator('sna.dgs_render_export_mesh_as_3dgs4dgs_ce2f7', text='Export PLY Sequence', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'export.svg')), emboss=True, depress=False)
+        op.sna_send_to_world_centre = False
+    else:
+        pass
+    op = col_AA350.operator('sna.dgs_render_open_output_folder_82000', text='Open Output Folder', icon_value=0, emboss=True, depress=False)
+    op.sna_path = bpy.context.scene.sna_dgs_scene_properties.export_output_path
 
 
-class SNA_OT_Dgs_Render_Export_Mesh_Object_As_3Dgs_Ply_Ce2F7(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_export_mesh_object_as_3dgs_ply_ce2f7"
-    bl_label = "3DGS Render: Export Mesh Object As 3DGS PLY"
-    bl_description = "Resets scale and rotation transforms, applies the Point Edit modifier and exports the active object for as a 3DGS .ply"
+class SNA_OT_Dgs_Render_Export_Mesh_As_3Dgs4Dgs_Ce2F7(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_export_mesh_as_3dgs4dgs_ce2f7"
+    bl_label = "3DGS Render: Export Mesh As 3DGS/4DGS"
+    bl_description = "Applies scale and rotation transforms, applies color modifiers and exports the active object as a 3DGS .ply"
     bl_options = {"REGISTER", "UNDO"}
+    sna_send_to_world_centre: bpy.props.BoolProperty(name='Send to World Centre', description='', options={'HIDDEN'}, default=True)
 
     @classmethod
     def poll(cls, context):
@@ -2478,284 +4022,1329 @@ class SNA_OT_Dgs_Render_Export_Mesh_Object_As_3Dgs_Ply_Ce2F7(bpy.types.Operator)
         return not False
 
     def execute(self, context):
-        if (bpy.context.view_layer.objects.active == None):
-            self.report({'ERROR'}, message='No active object')
-        else:
-            if (len(bpy.context.view_layer.objects.selected) > 1):
-                self.report({'ERROR'}, message='Only select 1 object please.')
+        if os.path.isdir(bpy.context.scene.sna_dgs_scene_properties.export_output_path):
+            if (bpy.context.view_layer.objects.active == None):
+                self.report({'ERROR'}, message='No Active Object')
             else:
-                if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Write F_DC_And_Merge' in bpy.context.view_layer.objects.active.modifiers):
-                    bpy.context.view_layer.objects.active.select_set(state=True, view_layer=bpy.context.view_layer, )
-                    bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Write F_DC_And_Merge'].show_viewport = True
-                    bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Write F_DC_And_Merge'].show_render = True
-                    bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Write F_DC_And_Merge']['Socket_2'] = True
-                    object_name = bpy.context.view_layer.objects.active.name
-                    # Replace this with your object's name
-                    #object_name = "YourObjectName"
-                    # Get the object
-                    obj = bpy.data.objects.get(object_name)
-                    if obj:
-                        # Make sure the object is selected and active
-                        bpy.context.view_layer.objects.active = obj
-                        obj.select_set(True)
-                        # Apply all modifiers
-                        for modifier in obj.modifiers[:]:  # [:] creates a copy of the list to avoid modification issues
+                if (len(bpy.context.view_layer.objects.selected) > 1):
+                    self.report({'ERROR'}, message='Only select 1 object please.')
+                else:
+                    if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Write F_DC_And_Merge' in bpy.context.view_layer.objects.active.modifiers):
+                        dgs_render__export['sna_export_base_object'] = bpy.context.view_layer.objects.active
+                        if self.sna_send_to_world_centre:
+                            bpy.context.view_layer.objects.active.location = (0.0, 0.0, 0.0)
+                        if bpy.context.scene.sna_dgs_scene_properties.export_single_or_sequence == "3DGS":
+                            new_object_name_0_52da7 = sna_duplicate_object_ED1F0(dgs_render__export['sna_export_base_object'].name)
+                            dgs_render__export['sna_export_temp_object'] = bpy.data.objects[new_object_name_0_52da7]
+                            dgs_render__export['sna_export_temp_object'].select_set(state=True, view_layer=bpy.context.view_layer, )
+                            dgs_render__export['sna_export_temp_object'].modifiers['KIRI_3DGS_Write F_DC_And_Merge'].show_viewport = True
+                            dgs_render__export['sna_export_temp_object'].modifiers['KIRI_3DGS_Write F_DC_And_Merge'].show_render = True
+
+                            def delayed_C77D9():
+                                if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Render_GN' in bpy.context.view_layer.objects.active.modifiers):
+                                    dgs_render__export['sna_export_base_object'].sna_dgs_object_properties.update_mode = 'Disable Camera Updates'
+                                sna_apply_all_modifiers_for_export_B90C0(dgs_render__export['sna_export_temp_object'].name)
+                                target_obj_name = dgs_render__export['sna_export_temp_object'].name
+                                import numpy as np
+                                #target_obj_name = ""  # Input: name of the mesh 3DGS object to process
+                                SCALE_ATTRIBUTES = ("scale_0", "scale_1", "scale_2")
+                                ROTATION_ATTRIBUTES = ("rot_0", "rot_1", "rot_2", "rot_3")
+                                DC_ATTRIBUTES = ("f_dc_0", "f_dc_1", "f_dc_2")
+                                SUPPORTED_SH_COEFFS = {1: 0, 4: 1, 9: 2, 16: 3}
+                                SH_C0 = 0.28209479177387814
+                                SH_C1 = 0.4886025119029199
+                                SH_C2_0 = 1.0925484305920792
+                                SH_C2_1 = -1.0925484305920792
+                                SH_C2_2 = 0.31539156525252005
+                                SH_C2_3 = -1.0925484305920792
+                                SH_C2_4 = 0.5462742152960396
+                                SH_C3_0 = -0.5900435899266435
+                                SH_C3_1 = 2.890611442640554
+                                SH_C3_2 = -0.4570457994644658
+                                SH_C3_3 = 0.3731763325901154
+                                SH_C3_4 = -0.4570457994644658
+                                SH_C3_5 = 1.445305721320277
+                                SH_C3_6 = -0.5900435899266435
+
+                                def get_target_mesh_object(obj_name):
+                                    obj_name = str(obj_name).strip()
+                                    if not obj_name:
+                                        raise ValueError("target_obj_name is empty. Provide the mesh object name to process.")
+                                    obj = bpy.data.objects.get(obj_name)
+                                    if not obj:
+                                        raise ValueError(f"Object '{obj_name}' was not found.")
+                                    if obj.type != "MESH":
+                                        raise ValueError(f"Object '{obj.name}' is not a mesh.")
+                                    if not hasattr(obj.data, "attributes"):
+                                        raise ValueError(f"Object '{obj.name}' does not have attribute data.")
+                                    return obj
+
+                                def get_float_attribute(obj, attr_name):
+                                    if attr_name not in obj.data.attributes:
+                                        raise ValueError(f"Attribute '{attr_name}' not found on object '{obj.name}'.")
+                                    attr = obj.data.attributes[attr_name]
+                                    if attr.data_type != "FLOAT":
+                                        raise ValueError(
+                                            f"Attribute '{attr_name}' must be FLOAT, found {attr.data_type}."
+                                        )
+                                    values = np.empty(len(attr.data), dtype=np.float32)
+                                    attr.data.foreach_get("value", values)
+                                    return attr, values
+
+                                def get_face_quad_vertex_groups(mesh_data):
+                                    """Return one disconnected 4-vertex group per quad face for face-based gaussian meshes."""
+                                    num_polygons = len(mesh_data.polygons)
+                                    if num_polygons == 0:
+                                        return None
+                                    face_vertex_indices = np.empty((num_polygons, 4), dtype=np.int32)
+                                    for poly_index, poly in enumerate(mesh_data.polygons):
+                                        poly_vertices = tuple(poly.vertices)
+                                        if len(poly_vertices) != 4:
+                                            return None
+                                        face_vertex_indices[poly_index] = poly_vertices
+                                    if np.unique(face_vertex_indices).size != len(mesh_data.vertices):
+                                        return None
+                                    return face_vertex_indices
+
+                                def collapse_attribute_values(data_array, face_vertex_indices, expected_vertex_count, attr_name):
+                                    """Collapse per-vertex data to one logical value per disconnected quad when needed."""
+                                    if face_vertex_indices is None:
+                                        return data_array.astype(np.float64)
+                                    if len(data_array) == expected_vertex_count:
+                                        return data_array[face_vertex_indices].mean(axis=1).astype(np.float64)
+                                    if len(data_array) == len(face_vertex_indices):
+                                        return data_array.astype(np.float64)
+                                    raise ValueError(
+                                        f"Attribute '{attr_name}' has {len(data_array)} values, expected {expected_vertex_count} vertices "
+                                        f"or {len(face_vertex_indices)} face islands."
+                                    )
+
+                                def expand_attribute_values(logical_values, raw_length, face_vertex_indices, expected_vertex_count, attr_name):
+                                    """Expand logical splat values back to the attribute storage domain."""
+                                    logical_values = np.asarray(logical_values, dtype=np.float64)
+                                    if face_vertex_indices is None:
+                                        if len(logical_values) != raw_length:
+                                            raise ValueError(
+                                                f"Attribute '{attr_name}' expects {raw_length} values, got {len(logical_values)}."
+                                            )
+                                        return logical_values.astype(np.float32)
+                                    if raw_length == len(face_vertex_indices):
+                                        if len(logical_values) != len(face_vertex_indices):
+                                            raise ValueError(
+                                                f"Attribute '{attr_name}' expects {len(face_vertex_indices)} logical values, got {len(logical_values)}."
+                                            )
+                                        return logical_values.astype(np.float32)
+                                    if raw_length == expected_vertex_count:
+                                        if len(logical_values) != len(face_vertex_indices):
+                                            raise ValueError(
+                                                f"Attribute '{attr_name}' expects {len(face_vertex_indices)} logical values for face expansion, "
+                                                f"got {len(logical_values)}."
+                                            )
+                                        expanded = np.empty(expected_vertex_count, dtype=np.float64)
+                                        expanded[face_vertex_indices] = logical_values[:, None]
+                                        return expanded.astype(np.float32)
+                                    raise ValueError(
+                                        f"Attribute '{attr_name}' has unsupported storage length {raw_length} for face-based expansion."
+                                    )
+
+                                def get_float_attribute_context(obj, attr_name, face_vertex_indices=None, expected_vertex_count=None):
+                                    attr, raw_values = get_float_attribute(obj, attr_name)
+                                    if expected_vertex_count is None:
+                                        expected_vertex_count = len(obj.data.vertices)
+                                    logical_values = collapse_attribute_values(
+                                        raw_values,
+                                        face_vertex_indices,
+                                        expected_vertex_count,
+                                        attr_name,
+                                    )
+                                    return {
+                                        "attr": attr,
+                                        "attr_name": attr_name,
+                                        "raw_length": len(raw_values),
+                                        "logical_values": logical_values,
+                                    }
+
+                                def set_attribute_context_values(context, logical_values, face_vertex_indices=None, expected_vertex_count=None):
+                                    if expected_vertex_count is None:
+                                        raise ValueError("expected_vertex_count is required when writing attribute values.")
+                                    values = expand_attribute_values(
+                                        logical_values,
+                                        context["raw_length"],
+                                        face_vertex_indices,
+                                        expected_vertex_count,
+                                        context["attr_name"],
+                                    )
+                                    context["attr"].data.foreach_set("value", values)
+
+                                def get_rotation_attribute_data(obj, face_vertex_indices=None, expected_vertex_count=None):
+                                    attrs = []
+                                    values = []
+                                    for attr_name in ROTATION_ATTRIBUTES:
+                                        attr_context = get_float_attribute_context(
+                                            obj,
+                                            attr_name,
+                                            face_vertex_indices=face_vertex_indices,
+                                            expected_vertex_count=expected_vertex_count,
+                                        )
+                                        attrs.append(attr_context)
+                                        values.append(attr_context["logical_values"])
+                                    quaternions = np.stack(values, axis=1)
+                                    norms = np.linalg.norm(quaternions, axis=1, keepdims=True)
+                                    norms = np.maximum(norms, 1e-12)
+                                    quaternions /= norms
+                                    return attrs, quaternions
+
+                                def get_scale_attribute_data(obj, face_vertex_indices=None, expected_vertex_count=None):
+                                    attrs = []
+                                    values = []
+                                    for attr_name in SCALE_ATTRIBUTES:
+                                        attr_context = get_float_attribute_context(
+                                            obj,
+                                            attr_name,
+                                            face_vertex_indices=face_vertex_indices,
+                                            expected_vertex_count=expected_vertex_count,
+                                        )
+                                        attrs.append(attr_context)
+                                        values.append(attr_context["logical_values"])
+                                    log_scales = np.stack(values, axis=1)
+                                    return attrs, log_scales
+
+                                def quaternions_to_rotation_matrices(quaternions):
+                                    w = quaternions[:, 0]
+                                    x = quaternions[:, 1]
+                                    y = quaternions[:, 2]
+                                    z = quaternions[:, 3]
+                                    xx = x * x
+                                    yy = y * y
+                                    zz = z * z
+                                    xy = x * y
+                                    xz = x * z
+                                    yz = y * z
+                                    wx = w * x
+                                    wy = w * y
+                                    wz = w * z
+                                    matrices = np.empty((len(quaternions), 3, 3), dtype=np.float64)
+                                    matrices[:, 0, 0] = 1.0 - 2.0 * (yy + zz)
+                                    matrices[:, 0, 1] = 2.0 * (xy - wz)
+                                    matrices[:, 0, 2] = 2.0 * (xz + wy)
+                                    matrices[:, 1, 0] = 2.0 * (xy + wz)
+                                    matrices[:, 1, 1] = 1.0 - 2.0 * (xx + zz)
+                                    matrices[:, 1, 2] = 2.0 * (yz - wx)
+                                    matrices[:, 2, 0] = 2.0 * (xz - wy)
+                                    matrices[:, 2, 1] = 2.0 * (yz + wx)
+                                    matrices[:, 2, 2] = 1.0 - 2.0 * (xx + yy)
+                                    return matrices
+
+                                def rotation_matrices_to_quaternions(matrices):
+                                    quaternions = np.zeros((len(matrices), 4), dtype=np.float64)
+                                    trace = matrices[:, 0, 0] + matrices[:, 1, 1] + matrices[:, 2, 2]
+                                    mask = trace > 0.0
+                                    if np.any(mask):
+                                        s = np.sqrt(trace[mask] + 1.0) * 2.0
+                                        quaternions[mask, 0] = 0.25 * s
+                                        quaternions[mask, 1] = (matrices[mask, 2, 1] - matrices[mask, 1, 2]) / s
+                                        quaternions[mask, 2] = (matrices[mask, 0, 2] - matrices[mask, 2, 0]) / s
+                                        quaternions[mask, 3] = (matrices[mask, 1, 0] - matrices[mask, 0, 1]) / s
+                                    mask_x = (~mask) & (matrices[:, 0, 0] > matrices[:, 1, 1]) & (matrices[:, 0, 0] > matrices[:, 2, 2])
+                                    if np.any(mask_x):
+                                        s = np.sqrt(1.0 + matrices[mask_x, 0, 0] - matrices[mask_x, 1, 1] - matrices[mask_x, 2, 2]) * 2.0
+                                        quaternions[mask_x, 0] = (matrices[mask_x, 2, 1] - matrices[mask_x, 1, 2]) / s
+                                        quaternions[mask_x, 1] = 0.25 * s
+                                        quaternions[mask_x, 2] = (matrices[mask_x, 0, 1] + matrices[mask_x, 1, 0]) / s
+                                        quaternions[mask_x, 3] = (matrices[mask_x, 0, 2] + matrices[mask_x, 2, 0]) / s
+                                    mask_y = (~mask) & (~mask_x) & (matrices[:, 1, 1] > matrices[:, 2, 2])
+                                    if np.any(mask_y):
+                                        s = np.sqrt(1.0 + matrices[mask_y, 1, 1] - matrices[mask_y, 0, 0] - matrices[mask_y, 2, 2]) * 2.0
+                                        quaternions[mask_y, 0] = (matrices[mask_y, 0, 2] - matrices[mask_y, 2, 0]) / s
+                                        quaternions[mask_y, 1] = (matrices[mask_y, 0, 1] + matrices[mask_y, 1, 0]) / s
+                                        quaternions[mask_y, 2] = 0.25 * s
+                                        quaternions[mask_y, 3] = (matrices[mask_y, 1, 2] + matrices[mask_y, 2, 1]) / s
+                                    mask_z = (~mask) & (~mask_x) & (~mask_y)
+                                    if np.any(mask_z):
+                                        s = np.sqrt(1.0 + matrices[mask_z, 2, 2] - matrices[mask_z, 0, 0] - matrices[mask_z, 1, 1]) * 2.0
+                                        quaternions[mask_z, 0] = (matrices[mask_z, 1, 0] - matrices[mask_z, 0, 1]) / s
+                                        quaternions[mask_z, 1] = (matrices[mask_z, 0, 2] + matrices[mask_z, 2, 0]) / s
+                                        quaternions[mask_z, 2] = (matrices[mask_z, 1, 2] + matrices[mask_z, 2, 1]) / s
+                                        quaternions[mask_z, 3] = 0.25 * s
+                                    norms = np.linalg.norm(quaternions, axis=1, keepdims=True)
+                                    norms = np.maximum(norms, 1e-12)
+                                    quaternions /= norms
+                                    negative_w = quaternions[:, 0] < 0.0
+                                    quaternions[negative_w] *= -1.0
+                                    return quaternions
+
+                                def get_object_linear_transform(obj):
+                                    linear_transform = np.array(obj.matrix_basis.to_3x3(), dtype=np.float64)
+                                    _, rotation_quat, _ = obj.matrix_basis.decompose()
+                                    rotation_matrix = np.array(rotation_quat.to_matrix(), dtype=np.float64)
+                                    return linear_transform, rotation_matrix, rotation_quat
+
+                                def bake_scale_and_rotation_attributes(obj, linear_transform, face_vertex_indices=None, expected_vertex_count=None):
+                                    rotation_attrs, quaternions = get_rotation_attribute_data(
+                                        obj,
+                                        face_vertex_indices=face_vertex_indices,
+                                        expected_vertex_count=expected_vertex_count,
+                                    )
+                                    scale_attrs, log_scales = get_scale_attribute_data(
+                                        obj,
+                                        face_vertex_indices=face_vertex_indices,
+                                        expected_vertex_count=expected_vertex_count,
+                                    )
+                                    scales = np.exp(log_scales)
+                                    rotation_mats = quaternions_to_rotation_matrices(quaternions)
+                                    scale_sq = np.zeros((len(scales), 3, 3), dtype=np.float64)
+                                    scale_sq[:, 0, 0] = scales[:, 0] ** 2
+                                    scale_sq[:, 1, 1] = scales[:, 1] ** 2
+                                    scale_sq[:, 2, 2] = scales[:, 2] ** 2
+                                    # Standard 3DGS covariance convention: Sigma = R * diag(scale^2) * R^T
+                                    covariances = np.matmul(rotation_mats, np.matmul(scale_sq, np.transpose(rotation_mats, (0, 2, 1))))
+                                    transformed_covariances = np.matmul(
+                                        linear_transform[None, :, :],
+                                        np.matmul(covariances, linear_transform.T[None, :, :]),
+                                    )
+                                    eigenvalues, eigenvectors = np.linalg.eigh(transformed_covariances)
+                                    order = np.argsort(eigenvalues, axis=1)[:, ::-1]
+                                    sorted_values = np.take_along_axis(eigenvalues, order, axis=1)
+                                    sorted_vectors = np.take_along_axis(eigenvectors, order[:, None, :], axis=2)
+                                    dets = np.linalg.det(sorted_vectors)
+                                    flip_mask = dets < 0.0
+                                    sorted_vectors[flip_mask, :, 2] *= -1.0
+                                    new_quaternions = rotation_matrices_to_quaternions(sorted_vectors)
+                                    new_scales = np.sqrt(np.maximum(sorted_values, 1e-20))
+                                    new_log_scales = np.log(new_scales)
+                                    for attr_index, attr_context in enumerate(rotation_attrs):
+                                        set_attribute_context_values(
+                                            attr_context,
+                                            new_quaternions[:, attr_index],
+                                            face_vertex_indices=face_vertex_indices,
+                                            expected_vertex_count=expected_vertex_count,
+                                        )
+                                    for attr_index, attr_context in enumerate(scale_attrs):
+                                        set_attribute_context_values(
+                                            attr_context,
+                                            new_log_scales[:, attr_index],
+                                            face_vertex_indices=face_vertex_indices,
+                                            expected_vertex_count=expected_vertex_count,
+                                        )
+                                    return len(new_quaternions)
+
+                                def fibonacci_sphere(sample_count):
+                                    indices = np.arange(sample_count, dtype=np.float64) + 0.5
+                                    phi = np.arccos(1.0 - 2.0 * indices / sample_count)
+                                    theta = math.pi * (1.0 + math.sqrt(5.0)) * indices
+                                    x = np.cos(theta) * np.sin(phi)
+                                    y = np.sin(theta) * np.sin(phi)
+                                    z = np.cos(phi)
+                                    return np.stack([x, y, z], axis=1)
+
+                                def evaluate_real_sh_basis(directions):
+                                    x = directions[:, 0]
+                                    y = directions[:, 1]
+                                    z = directions[:, 2]
+                                    xx = x * x
+                                    yy = y * y
+                                    zz = z * z
+                                    xy = x * y
+                                    yz = y * z
+                                    xz = x * z
+                                    basis = np.empty((len(directions), 16), dtype=np.float64)
+                                    basis[:, 0] = SH_C0
+                                    basis[:, 1] = -SH_C1 * y
+                                    basis[:, 2] = SH_C1 * z
+                                    basis[:, 3] = -SH_C1 * x
+                                    basis[:, 4] = SH_C2_0 * xy
+                                    basis[:, 5] = SH_C2_1 * yz
+                                    basis[:, 6] = SH_C2_2 * (2.0 * zz - xx - yy)
+                                    basis[:, 7] = SH_C2_3 * xz
+                                    basis[:, 8] = SH_C2_4 * (xx - yy)
+                                    basis[:, 9] = SH_C3_0 * y * (3.0 * xx - yy)
+                                    basis[:, 10] = SH_C3_1 * xy * z
+                                    basis[:, 11] = SH_C3_2 * y * (4.0 * zz - xx - yy)
+                                    basis[:, 12] = SH_C3_3 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy)
+                                    basis[:, 13] = SH_C3_4 * x * (4.0 * zz - xx - yy)
+                                    basis[:, 14] = SH_C3_5 * z * (xx - yy)
+                                    basis[:, 15] = SH_C3_6 * x * (xx - 3.0 * yy)
+                                    return basis
+
+                                def build_sh_rotation_matrix(rotation_matrix, sh_degree):
+                                    total_coeffs = (sh_degree + 1) ** 2
+                                    if total_coeffs == 1:
+                                        return np.eye(1, dtype=np.float64)
+                                    sample_dirs = fibonacci_sphere(256)
+                                    rotated_dirs = sample_dirs @ rotation_matrix
+                                    full_basis = evaluate_real_sh_basis(sample_dirs)
+                                    rotated_basis = evaluate_real_sh_basis(rotated_dirs)
+                                    rotation_matrix_full = np.zeros((total_coeffs, total_coeffs), dtype=np.float64)
+                                    rotation_matrix_full[0, 0] = 1.0
+                                    degree_offsets = {
+                                        1: (1, 4),
+                                        2: (4, 9),
+                                        3: (9, 16),
+                                    }
+                                    for degree in range(1, sh_degree + 1):
+                                        start, end = degree_offsets[degree]
+                                        basis_block = full_basis[:, start:end]
+                                        rotated_block = rotated_basis[:, start:end]
+                                        solved_block, _, _, _ = np.linalg.lstsq(basis_block, rotated_block, rcond=None)
+                                        rotation_matrix_full[start:end, start:end] = solved_block
+                                    return rotation_matrix_full
+
+                                def get_sh_attribute_layout(obj, face_vertex_indices=None, expected_vertex_count=None):
+                                    dc_attrs = []
+                                    for attr_name in DC_ATTRIBUTES:
+                                        attr_context = get_float_attribute_context(
+                                            obj,
+                                            attr_name,
+                                            face_vertex_indices=face_vertex_indices,
+                                            expected_vertex_count=expected_vertex_count,
+                                        )
+                                        dc_attrs.append(attr_context)
+                                    f_rest_fields = [attr.name for attr in obj.data.attributes if attr.name.startswith("f_rest_")]
+                                    f_rest_fields = sorted(f_rest_fields, key=lambda name: int(name.split("_")[-1]))
+                                    if not f_rest_fields:
+                                        return None, 0
+                                    if len(f_rest_fields) % 3 != 0:
+                                        raise ValueError("f_rest attributes are incomplete. Expected 3 matching channels.")
+                                    coeffs_per_channel = 1 + (len(f_rest_fields) // 3)
+                                    if coeffs_per_channel not in SUPPORTED_SH_COEFFS:
+                                        raise ValueError(
+                                            f"Unsupported SH layout on '{obj.name}'. Found {coeffs_per_channel} coeffs per channel."
+                                        )
+                                    channel_rest_count = coeffs_per_channel - 1
+                                    channel_attrs = []
+                                    for channel_index in range(3):
+                                        attrs = []
+                                        values = []
+                                        dc_context = dc_attrs[channel_index]
+                                        attrs.append(dc_context)
+                                        values.append(dc_context["logical_values"])
+                                        start = channel_index * channel_rest_count
+                                        end = start + channel_rest_count
+                                        for attr_name in f_rest_fields[start:end]:
+                                            attr_context = get_float_attribute_context(
+                                                obj,
+                                                attr_name,
+                                                face_vertex_indices=face_vertex_indices,
+                                                expected_vertex_count=expected_vertex_count,
+                                            )
+                                            attrs.append(attr_context)
+                                            values.append(attr_context["logical_values"])
+                                        channel_attrs.append((attrs, np.stack(values, axis=1)))
+                                    sh_degree = SUPPORTED_SH_COEFFS[coeffs_per_channel]
+                                    return channel_attrs, sh_degree
+
+                                def bake_sh_attributes(obj, rotation_matrix, face_vertex_indices=None, expected_vertex_count=None):
+                                    channel_data, sh_degree = get_sh_attribute_layout(
+                                        obj,
+                                        face_vertex_indices=face_vertex_indices,
+                                        expected_vertex_count=expected_vertex_count,
+                                    )
+                                    if sh_degree == 0:
+                                        return 0
+                                    sh_rotation = build_sh_rotation_matrix(rotation_matrix, sh_degree)
+                                    for attrs, coeffs in channel_data:
+                                        rotated_coeffs = coeffs @ sh_rotation.T
+                                        for attr_index, attr_context in enumerate(attrs):
+                                            set_attribute_context_values(
+                                                attr_context,
+                                                rotated_coeffs[:, attr_index],
+                                                face_vertex_indices=face_vertex_indices,
+                                                expected_vertex_count=expected_vertex_count,
+                                            )
+                                    return sh_degree
+
+                                def apply_object_rotation_and_scale(obj):
+                                    original_mode = obj.mode
+                                    view_layer = bpy.context.view_layer
+                                    original_active = view_layer.objects.active
+                                    originally_selected = list(bpy.context.selected_objects)
+                                    try:
+                                        if original_mode != "OBJECT":
+                                            bpy.ops.object.mode_set(mode="OBJECT")
+                                        for selected_obj in originally_selected:
+                                            selected_obj.select_set(False)
+                                        obj.select_set(True)
+                                        view_layer.objects.active = obj
+                                        bpy.ops.object.transform_apply(
+                                            location=False,
+                                            rotation=True,
+                                            scale=True,
+                                        )
+                                    finally:
+                                        obj.select_set(False)
+                                        for selected_obj in originally_selected:
+                                            if selected_obj and selected_obj.name in bpy.data.objects:
+                                                selected_obj.select_set(True)
+                                        if original_active and original_active.name in bpy.data.objects:
+                                            view_layer.objects.active = original_active
+                                        if original_mode != "OBJECT":
+                                            try:
+                                                bpy.ops.object.mode_set(mode=original_mode)
+                                            except Exception:
+                                                pass
+
+                                def main():
+                                    obj = get_target_mesh_object(target_obj_name)
+                                    expected_vertex_count = len(obj.data.vertices)
+                                    face_vertex_indices = get_face_quad_vertex_groups(obj.data)
+                                    if face_vertex_indices is not None:
+                                        print(
+                                            f"Detected face-based gaussian mesh '{obj.name}', collapsing "
+                                            f"{expected_vertex_count:,} quad vertices to {len(face_vertex_indices):,} logical splats for transform bake."
+                                        )
+                                    linear_transform, rotation_matrix, rotation_quat = get_object_linear_transform(obj)
+                                    splat_count = bake_scale_and_rotation_attributes(
+                                        obj,
+                                        linear_transform,
+                                        face_vertex_indices=face_vertex_indices,
+                                        expected_vertex_count=expected_vertex_count,
+                                    )
+                                    sh_degree = bake_sh_attributes(
+                                        obj,
+                                        rotation_matrix,
+                                        face_vertex_indices=face_vertex_indices,
+                                        expected_vertex_count=expected_vertex_count,
+                                    )
+                                    apply_object_rotation_and_scale(obj)
+                                    print(f"Baked scale/rotation into {splat_count:,} splats on '{obj.name}'.")
+                                    if sh_degree > 0:
+                                        print(f"Rotated SH attributes up to degree {sh_degree}.")
+                                    else:
+                                        print("No higher SH attributes found to rotate.")
+                                    print(
+                                        "Applied object rotation/scale to mesh and reset object transforms "
+                                        f"(object rotation quaternion was {rotation_quat.w:.6f}, {rotation_quat.x:.6f}, "
+                                        f"{rotation_quat.y:.6f}, {rotation_quat.z:.6f})."
+                                    )
+                                    print("3DGS transform bake completed.")
+                                main()
+
+                                def delayed_5B08A():
+                                    bpy.ops.wm.ply_export(filepath=os.path.join(bpy.context.scene.sna_dgs_scene_properties.export_output_path,dgs_render__export['sna_export_base_object'].name + bpy.context.scene.sna_dgs_scene_properties.export_suffix + '.ply'), export_selected_objects=True, export_attributes=True)
+                                    bpy.data.objects.remove(object=dgs_render__export['sna_export_temp_object'], do_unlink=True, do_id_user=True, do_ui_user=True, )
+                                bpy.app.timers.register(delayed_5B08A, first_interval=0.10000000149011612)
+                            bpy.app.timers.register(delayed_C77D9, first_interval=0.10000000149011612)
+                        elif bpy.context.scene.sna_dgs_scene_properties.export_single_or_sequence == "4DGS":
+                            if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Render_GN' in bpy.context.view_layer.objects.active.modifiers):
+                                bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN']['Socket_50'] = 1
+                                bpy.context.view_layer.objects.active.sna_dgs_object_properties.update_mode = 'Disable Camera Updates'
+                            if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Animate_GN' in bpy.context.view_layer.objects.active.modifiers):
+                                if bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Animate_GN'].show_viewport:
+                                    if ((bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Animate_GN']['Socket_26'] == 1) or (bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Animate_GN']['Socket_26'] == 2)):
+                                        bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Animate_GN']['Socket_26'] = 0
+                            bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Write F_DC_And_Merge'].show_viewport = True
+                            bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Write F_DC_And_Merge'].show_render = True
+                            bpy.context.view_layer.objects.active.update_tag(refresh={'OBJECT'}, )
+                            if bpy.context and bpy.context.screen:
+                                for a in bpy.context.screen.areas:
+                                    a.tag_redraw()
+                            target_obj_name = bpy.context.view_layer.objects.active.name
+                            import numpy as np
+                            #target_obj_name = ""  # Input: name of the mesh 3DGS object to process
+                            SCALE_ATTRIBUTES = ("scale_0", "scale_1", "scale_2")
+                            ROTATION_ATTRIBUTES = ("rot_0", "rot_1", "rot_2", "rot_3")
+                            DC_ATTRIBUTES = ("f_dc_0", "f_dc_1", "f_dc_2")
+                            SUPPORTED_SH_COEFFS = {1: 0, 4: 1, 9: 2, 16: 3}
+                            SH_C0 = 0.28209479177387814
+                            SH_C1 = 0.4886025119029199
+                            SH_C2_0 = 1.0925484305920792
+                            SH_C2_1 = -1.0925484305920792
+                            SH_C2_2 = 0.31539156525252005
+                            SH_C2_3 = -1.0925484305920792
+                            SH_C2_4 = 0.5462742152960396
+                            SH_C3_0 = -0.5900435899266435
+                            SH_C3_1 = 2.890611442640554
+                            SH_C3_2 = -0.4570457994644658
+                            SH_C3_3 = 0.3731763325901154
+                            SH_C3_4 = -0.4570457994644658
+                            SH_C3_5 = 1.445305721320277
+                            SH_C3_6 = -0.5900435899266435
+
+                            def get_target_mesh_object(obj_name):
+                                obj_name = str(obj_name).strip()
+                                if not obj_name:
+                                    raise ValueError("target_obj_name is empty. Provide the mesh object name to process.")
+                                obj = bpy.data.objects.get(obj_name)
+                                if not obj:
+                                    raise ValueError(f"Object '{obj_name}' was not found.")
+                                if obj.type != "MESH":
+                                    raise ValueError(f"Object '{obj.name}' is not a mesh.")
+                                if not hasattr(obj.data, "attributes"):
+                                    raise ValueError(f"Object '{obj.name}' does not have attribute data.")
+                                return obj
+
+                            def get_float_attribute(obj, attr_name):
+                                if attr_name not in obj.data.attributes:
+                                    raise ValueError(f"Attribute '{attr_name}' not found on object '{obj.name}'.")
+                                attr = obj.data.attributes[attr_name]
+                                if attr.data_type != "FLOAT":
+                                    raise ValueError(
+                                        f"Attribute '{attr_name}' must be FLOAT, found {attr.data_type}."
+                                    )
+                                values = np.empty(len(attr.data), dtype=np.float32)
+                                attr.data.foreach_get("value", values)
+                                return attr, values
+
+                            def get_face_quad_vertex_groups(mesh_data):
+                                """Return one disconnected 4-vertex group per quad face for face-based gaussian meshes."""
+                                num_polygons = len(mesh_data.polygons)
+                                if num_polygons == 0:
+                                    return None
+                                face_vertex_indices = np.empty((num_polygons, 4), dtype=np.int32)
+                                for poly_index, poly in enumerate(mesh_data.polygons):
+                                    poly_vertices = tuple(poly.vertices)
+                                    if len(poly_vertices) != 4:
+                                        return None
+                                    face_vertex_indices[poly_index] = poly_vertices
+                                if np.unique(face_vertex_indices).size != len(mesh_data.vertices):
+                                    return None
+                                return face_vertex_indices
+
+                            def collapse_attribute_values(data_array, face_vertex_indices, expected_vertex_count, attr_name):
+                                """Collapse per-vertex data to one logical value per disconnected quad when needed."""
+                                if face_vertex_indices is None:
+                                    return data_array.astype(np.float64)
+                                if len(data_array) == expected_vertex_count:
+                                    return data_array[face_vertex_indices].mean(axis=1).astype(np.float64)
+                                if len(data_array) == len(face_vertex_indices):
+                                    return data_array.astype(np.float64)
+                                raise ValueError(
+                                    f"Attribute '{attr_name}' has {len(data_array)} values, expected {expected_vertex_count} vertices "
+                                    f"or {len(face_vertex_indices)} face islands."
+                                )
+
+                            def expand_attribute_values(logical_values, raw_length, face_vertex_indices, expected_vertex_count, attr_name):
+                                """Expand logical splat values back to the attribute storage domain."""
+                                logical_values = np.asarray(logical_values, dtype=np.float64)
+                                if face_vertex_indices is None:
+                                    if len(logical_values) != raw_length:
+                                        raise ValueError(
+                                            f"Attribute '{attr_name}' expects {raw_length} values, got {len(logical_values)}."
+                                        )
+                                    return logical_values.astype(np.float32)
+                                if raw_length == len(face_vertex_indices):
+                                    if len(logical_values) != len(face_vertex_indices):
+                                        raise ValueError(
+                                            f"Attribute '{attr_name}' expects {len(face_vertex_indices)} logical values, got {len(logical_values)}."
+                                        )
+                                    return logical_values.astype(np.float32)
+                                if raw_length == expected_vertex_count:
+                                    if len(logical_values) != len(face_vertex_indices):
+                                        raise ValueError(
+                                            f"Attribute '{attr_name}' expects {len(face_vertex_indices)} logical values for face expansion, "
+                                            f"got {len(logical_values)}."
+                                        )
+                                    expanded = np.empty(expected_vertex_count, dtype=np.float64)
+                                    expanded[face_vertex_indices] = logical_values[:, None]
+                                    return expanded.astype(np.float32)
+                                raise ValueError(
+                                    f"Attribute '{attr_name}' has unsupported storage length {raw_length} for face-based expansion."
+                                )
+
+                            def get_float_attribute_context(obj, attr_name, face_vertex_indices=None, expected_vertex_count=None):
+                                attr, raw_values = get_float_attribute(obj, attr_name)
+                                if expected_vertex_count is None:
+                                    expected_vertex_count = len(obj.data.vertices)
+                                logical_values = collapse_attribute_values(
+                                    raw_values,
+                                    face_vertex_indices,
+                                    expected_vertex_count,
+                                    attr_name,
+                                )
+                                return {
+                                    "attr": attr,
+                                    "attr_name": attr_name,
+                                    "raw_length": len(raw_values),
+                                    "logical_values": logical_values,
+                                }
+
+                            def set_attribute_context_values(context, logical_values, face_vertex_indices=None, expected_vertex_count=None):
+                                if expected_vertex_count is None:
+                                    raise ValueError("expected_vertex_count is required when writing attribute values.")
+                                values = expand_attribute_values(
+                                    logical_values,
+                                    context["raw_length"],
+                                    face_vertex_indices,
+                                    expected_vertex_count,
+                                    context["attr_name"],
+                                )
+                                context["attr"].data.foreach_set("value", values)
+
+                            def get_rotation_attribute_data(obj, face_vertex_indices=None, expected_vertex_count=None):
+                                attrs = []
+                                values = []
+                                for attr_name in ROTATION_ATTRIBUTES:
+                                    attr_context = get_float_attribute_context(
+                                        obj,
+                                        attr_name,
+                                        face_vertex_indices=face_vertex_indices,
+                                        expected_vertex_count=expected_vertex_count,
+                                    )
+                                    attrs.append(attr_context)
+                                    values.append(attr_context["logical_values"])
+                                quaternions = np.stack(values, axis=1)
+                                norms = np.linalg.norm(quaternions, axis=1, keepdims=True)
+                                norms = np.maximum(norms, 1e-12)
+                                quaternions /= norms
+                                return attrs, quaternions
+
+                            def get_scale_attribute_data(obj, face_vertex_indices=None, expected_vertex_count=None):
+                                attrs = []
+                                values = []
+                                for attr_name in SCALE_ATTRIBUTES:
+                                    attr_context = get_float_attribute_context(
+                                        obj,
+                                        attr_name,
+                                        face_vertex_indices=face_vertex_indices,
+                                        expected_vertex_count=expected_vertex_count,
+                                    )
+                                    attrs.append(attr_context)
+                                    values.append(attr_context["logical_values"])
+                                log_scales = np.stack(values, axis=1)
+                                return attrs, log_scales
+
+                            def quaternions_to_rotation_matrices(quaternions):
+                                w = quaternions[:, 0]
+                                x = quaternions[:, 1]
+                                y = quaternions[:, 2]
+                                z = quaternions[:, 3]
+                                xx = x * x
+                                yy = y * y
+                                zz = z * z
+                                xy = x * y
+                                xz = x * z
+                                yz = y * z
+                                wx = w * x
+                                wy = w * y
+                                wz = w * z
+                                matrices = np.empty((len(quaternions), 3, 3), dtype=np.float64)
+                                matrices[:, 0, 0] = 1.0 - 2.0 * (yy + zz)
+                                matrices[:, 0, 1] = 2.0 * (xy - wz)
+                                matrices[:, 0, 2] = 2.0 * (xz + wy)
+                                matrices[:, 1, 0] = 2.0 * (xy + wz)
+                                matrices[:, 1, 1] = 1.0 - 2.0 * (xx + zz)
+                                matrices[:, 1, 2] = 2.0 * (yz - wx)
+                                matrices[:, 2, 0] = 2.0 * (xz - wy)
+                                matrices[:, 2, 1] = 2.0 * (yz + wx)
+                                matrices[:, 2, 2] = 1.0 - 2.0 * (xx + yy)
+                                return matrices
+
+                            def rotation_matrices_to_quaternions(matrices):
+                                quaternions = np.zeros((len(matrices), 4), dtype=np.float64)
+                                trace = matrices[:, 0, 0] + matrices[:, 1, 1] + matrices[:, 2, 2]
+                                mask = trace > 0.0
+                                if np.any(mask):
+                                    s = np.sqrt(trace[mask] + 1.0) * 2.0
+                                    quaternions[mask, 0] = 0.25 * s
+                                    quaternions[mask, 1] = (matrices[mask, 2, 1] - matrices[mask, 1, 2]) / s
+                                    quaternions[mask, 2] = (matrices[mask, 0, 2] - matrices[mask, 2, 0]) / s
+                                    quaternions[mask, 3] = (matrices[mask, 1, 0] - matrices[mask, 0, 1]) / s
+                                mask_x = (~mask) & (matrices[:, 0, 0] > matrices[:, 1, 1]) & (matrices[:, 0, 0] > matrices[:, 2, 2])
+                                if np.any(mask_x):
+                                    s = np.sqrt(1.0 + matrices[mask_x, 0, 0] - matrices[mask_x, 1, 1] - matrices[mask_x, 2, 2]) * 2.0
+                                    quaternions[mask_x, 0] = (matrices[mask_x, 2, 1] - matrices[mask_x, 1, 2]) / s
+                                    quaternions[mask_x, 1] = 0.25 * s
+                                    quaternions[mask_x, 2] = (matrices[mask_x, 0, 1] + matrices[mask_x, 1, 0]) / s
+                                    quaternions[mask_x, 3] = (matrices[mask_x, 0, 2] + matrices[mask_x, 2, 0]) / s
+                                mask_y = (~mask) & (~mask_x) & (matrices[:, 1, 1] > matrices[:, 2, 2])
+                                if np.any(mask_y):
+                                    s = np.sqrt(1.0 + matrices[mask_y, 1, 1] - matrices[mask_y, 0, 0] - matrices[mask_y, 2, 2]) * 2.0
+                                    quaternions[mask_y, 0] = (matrices[mask_y, 0, 2] - matrices[mask_y, 2, 0]) / s
+                                    quaternions[mask_y, 1] = (matrices[mask_y, 0, 1] + matrices[mask_y, 1, 0]) / s
+                                    quaternions[mask_y, 2] = 0.25 * s
+                                    quaternions[mask_y, 3] = (matrices[mask_y, 1, 2] + matrices[mask_y, 2, 1]) / s
+                                mask_z = (~mask) & (~mask_x) & (~mask_y)
+                                if np.any(mask_z):
+                                    s = np.sqrt(1.0 + matrices[mask_z, 2, 2] - matrices[mask_z, 0, 0] - matrices[mask_z, 1, 1]) * 2.0
+                                    quaternions[mask_z, 0] = (matrices[mask_z, 1, 0] - matrices[mask_z, 0, 1]) / s
+                                    quaternions[mask_z, 1] = (matrices[mask_z, 0, 2] + matrices[mask_z, 2, 0]) / s
+                                    quaternions[mask_z, 2] = (matrices[mask_z, 1, 2] + matrices[mask_z, 2, 1]) / s
+                                    quaternions[mask_z, 3] = 0.25 * s
+                                norms = np.linalg.norm(quaternions, axis=1, keepdims=True)
+                                norms = np.maximum(norms, 1e-12)
+                                quaternions /= norms
+                                negative_w = quaternions[:, 0] < 0.0
+                                quaternions[negative_w] *= -1.0
+                                return quaternions
+
+                            def get_object_linear_transform(obj):
+                                linear_transform = np.array(obj.matrix_basis.to_3x3(), dtype=np.float64)
+                                _, rotation_quat, _ = obj.matrix_basis.decompose()
+                                rotation_matrix = np.array(rotation_quat.to_matrix(), dtype=np.float64)
+                                return linear_transform, rotation_matrix, rotation_quat
+
+                            def bake_scale_and_rotation_attributes(obj, linear_transform, face_vertex_indices=None, expected_vertex_count=None):
+                                rotation_attrs, quaternions = get_rotation_attribute_data(
+                                    obj,
+                                    face_vertex_indices=face_vertex_indices,
+                                    expected_vertex_count=expected_vertex_count,
+                                )
+                                scale_attrs, log_scales = get_scale_attribute_data(
+                                    obj,
+                                    face_vertex_indices=face_vertex_indices,
+                                    expected_vertex_count=expected_vertex_count,
+                                )
+                                scales = np.exp(log_scales)
+                                rotation_mats = quaternions_to_rotation_matrices(quaternions)
+                                scale_sq = np.zeros((len(scales), 3, 3), dtype=np.float64)
+                                scale_sq[:, 0, 0] = scales[:, 0] ** 2
+                                scale_sq[:, 1, 1] = scales[:, 1] ** 2
+                                scale_sq[:, 2, 2] = scales[:, 2] ** 2
+                                # Standard 3DGS covariance convention: Sigma = R * diag(scale^2) * R^T
+                                covariances = np.matmul(rotation_mats, np.matmul(scale_sq, np.transpose(rotation_mats, (0, 2, 1))))
+                                transformed_covariances = np.matmul(
+                                    linear_transform[None, :, :],
+                                    np.matmul(covariances, linear_transform.T[None, :, :]),
+                                )
+                                eigenvalues, eigenvectors = np.linalg.eigh(transformed_covariances)
+                                order = np.argsort(eigenvalues, axis=1)[:, ::-1]
+                                sorted_values = np.take_along_axis(eigenvalues, order, axis=1)
+                                sorted_vectors = np.take_along_axis(eigenvectors, order[:, None, :], axis=2)
+                                dets = np.linalg.det(sorted_vectors)
+                                flip_mask = dets < 0.0
+                                sorted_vectors[flip_mask, :, 2] *= -1.0
+                                new_quaternions = rotation_matrices_to_quaternions(sorted_vectors)
+                                new_scales = np.sqrt(np.maximum(sorted_values, 1e-20))
+                                new_log_scales = np.log(new_scales)
+                                for attr_index, attr_context in enumerate(rotation_attrs):
+                                    set_attribute_context_values(
+                                        attr_context,
+                                        new_quaternions[:, attr_index],
+                                        face_vertex_indices=face_vertex_indices,
+                                        expected_vertex_count=expected_vertex_count,
+                                    )
+                                for attr_index, attr_context in enumerate(scale_attrs):
+                                    set_attribute_context_values(
+                                        attr_context,
+                                        new_log_scales[:, attr_index],
+                                        face_vertex_indices=face_vertex_indices,
+                                        expected_vertex_count=expected_vertex_count,
+                                    )
+                                return len(new_quaternions)
+
+                            def fibonacci_sphere(sample_count):
+                                indices = np.arange(sample_count, dtype=np.float64) + 0.5
+                                phi = np.arccos(1.0 - 2.0 * indices / sample_count)
+                                theta = math.pi * (1.0 + math.sqrt(5.0)) * indices
+                                x = np.cos(theta) * np.sin(phi)
+                                y = np.sin(theta) * np.sin(phi)
+                                z = np.cos(phi)
+                                return np.stack([x, y, z], axis=1)
+
+                            def evaluate_real_sh_basis(directions):
+                                x = directions[:, 0]
+                                y = directions[:, 1]
+                                z = directions[:, 2]
+                                xx = x * x
+                                yy = y * y
+                                zz = z * z
+                                xy = x * y
+                                yz = y * z
+                                xz = x * z
+                                basis = np.empty((len(directions), 16), dtype=np.float64)
+                                basis[:, 0] = SH_C0
+                                basis[:, 1] = -SH_C1 * y
+                                basis[:, 2] = SH_C1 * z
+                                basis[:, 3] = -SH_C1 * x
+                                basis[:, 4] = SH_C2_0 * xy
+                                basis[:, 5] = SH_C2_1 * yz
+                                basis[:, 6] = SH_C2_2 * (2.0 * zz - xx - yy)
+                                basis[:, 7] = SH_C2_3 * xz
+                                basis[:, 8] = SH_C2_4 * (xx - yy)
+                                basis[:, 9] = SH_C3_0 * y * (3.0 * xx - yy)
+                                basis[:, 10] = SH_C3_1 * xy * z
+                                basis[:, 11] = SH_C3_2 * y * (4.0 * zz - xx - yy)
+                                basis[:, 12] = SH_C3_3 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy)
+                                basis[:, 13] = SH_C3_4 * x * (4.0 * zz - xx - yy)
+                                basis[:, 14] = SH_C3_5 * z * (xx - yy)
+                                basis[:, 15] = SH_C3_6 * x * (xx - 3.0 * yy)
+                                return basis
+
+                            def build_sh_rotation_matrix(rotation_matrix, sh_degree):
+                                total_coeffs = (sh_degree + 1) ** 2
+                                if total_coeffs == 1:
+                                    return np.eye(1, dtype=np.float64)
+                                sample_dirs = fibonacci_sphere(256)
+                                rotated_dirs = sample_dirs @ rotation_matrix
+                                full_basis = evaluate_real_sh_basis(sample_dirs)
+                                rotated_basis = evaluate_real_sh_basis(rotated_dirs)
+                                rotation_matrix_full = np.zeros((total_coeffs, total_coeffs), dtype=np.float64)
+                                rotation_matrix_full[0, 0] = 1.0
+                                degree_offsets = {
+                                    1: (1, 4),
+                                    2: (4, 9),
+                                    3: (9, 16),
+                                }
+                                for degree in range(1, sh_degree + 1):
+                                    start, end = degree_offsets[degree]
+                                    basis_block = full_basis[:, start:end]
+                                    rotated_block = rotated_basis[:, start:end]
+                                    solved_block, _, _, _ = np.linalg.lstsq(basis_block, rotated_block, rcond=None)
+                                    rotation_matrix_full[start:end, start:end] = solved_block
+                                return rotation_matrix_full
+
+                            def get_sh_attribute_layout(obj, face_vertex_indices=None, expected_vertex_count=None):
+                                dc_attrs = []
+                                for attr_name in DC_ATTRIBUTES:
+                                    attr_context = get_float_attribute_context(
+                                        obj,
+                                        attr_name,
+                                        face_vertex_indices=face_vertex_indices,
+                                        expected_vertex_count=expected_vertex_count,
+                                    )
+                                    dc_attrs.append(attr_context)
+                                f_rest_fields = [attr.name for attr in obj.data.attributes if attr.name.startswith("f_rest_")]
+                                f_rest_fields = sorted(f_rest_fields, key=lambda name: int(name.split("_")[-1]))
+                                if not f_rest_fields:
+                                    return None, 0
+                                if len(f_rest_fields) % 3 != 0:
+                                    raise ValueError("f_rest attributes are incomplete. Expected 3 matching channels.")
+                                coeffs_per_channel = 1 + (len(f_rest_fields) // 3)
+                                if coeffs_per_channel not in SUPPORTED_SH_COEFFS:
+                                    raise ValueError(
+                                        f"Unsupported SH layout on '{obj.name}'. Found {coeffs_per_channel} coeffs per channel."
+                                    )
+                                channel_rest_count = coeffs_per_channel - 1
+                                channel_attrs = []
+                                for channel_index in range(3):
+                                    attrs = []
+                                    values = []
+                                    dc_context = dc_attrs[channel_index]
+                                    attrs.append(dc_context)
+                                    values.append(dc_context["logical_values"])
+                                    start = channel_index * channel_rest_count
+                                    end = start + channel_rest_count
+                                    for attr_name in f_rest_fields[start:end]:
+                                        attr_context = get_float_attribute_context(
+                                            obj,
+                                            attr_name,
+                                            face_vertex_indices=face_vertex_indices,
+                                            expected_vertex_count=expected_vertex_count,
+                                        )
+                                        attrs.append(attr_context)
+                                        values.append(attr_context["logical_values"])
+                                    channel_attrs.append((attrs, np.stack(values, axis=1)))
+                                sh_degree = SUPPORTED_SH_COEFFS[coeffs_per_channel]
+                                return channel_attrs, sh_degree
+
+                            def bake_sh_attributes(obj, rotation_matrix, face_vertex_indices=None, expected_vertex_count=None):
+                                channel_data, sh_degree = get_sh_attribute_layout(
+                                    obj,
+                                    face_vertex_indices=face_vertex_indices,
+                                    expected_vertex_count=expected_vertex_count,
+                                )
+                                if sh_degree == 0:
+                                    return 0
+                                sh_rotation = build_sh_rotation_matrix(rotation_matrix, sh_degree)
+                                for attrs, coeffs in channel_data:
+                                    rotated_coeffs = coeffs @ sh_rotation.T
+                                    for attr_index, attr_context in enumerate(attrs):
+                                        set_attribute_context_values(
+                                            attr_context,
+                                            rotated_coeffs[:, attr_index],
+                                            face_vertex_indices=face_vertex_indices,
+                                            expected_vertex_count=expected_vertex_count,
+                                        )
+                                return sh_degree
+
+                            def apply_object_rotation_and_scale(obj):
+                                original_mode = obj.mode
+                                view_layer = bpy.context.view_layer
+                                original_active = view_layer.objects.active
+                                originally_selected = list(bpy.context.selected_objects)
+                                try:
+                                    if original_mode != "OBJECT":
+                                        bpy.ops.object.mode_set(mode="OBJECT")
+                                    for selected_obj in originally_selected:
+                                        selected_obj.select_set(False)
+                                    obj.select_set(True)
+                                    view_layer.objects.active = obj
+                                    bpy.ops.object.transform_apply(
+                                        location=False,
+                                        rotation=True,
+                                        scale=True,
+                                    )
+                                finally:
+                                    obj.select_set(False)
+                                    for selected_obj in originally_selected:
+                                        if selected_obj and selected_obj.name in bpy.data.objects:
+                                            selected_obj.select_set(True)
+                                    if original_active and original_active.name in bpy.data.objects:
+                                        view_layer.objects.active = original_active
+                                    if original_mode != "OBJECT":
+                                        try:
+                                            bpy.ops.object.mode_set(mode=original_mode)
+                                        except Exception:
+                                            pass
+
+                            def main():
+                                obj = get_target_mesh_object(target_obj_name)
+                                expected_vertex_count = len(obj.data.vertices)
+                                face_vertex_indices = get_face_quad_vertex_groups(obj.data)
+                                if face_vertex_indices is not None:
+                                    print(
+                                        f"Detected face-based gaussian mesh '{obj.name}', collapsing "
+                                        f"{expected_vertex_count:,} quad vertices to {len(face_vertex_indices):,} logical splats for transform bake."
+                                    )
+                                linear_transform, rotation_matrix, rotation_quat = get_object_linear_transform(obj)
+                                splat_count = bake_scale_and_rotation_attributes(
+                                    obj,
+                                    linear_transform,
+                                    face_vertex_indices=face_vertex_indices,
+                                    expected_vertex_count=expected_vertex_count,
+                                )
+                                sh_degree = bake_sh_attributes(
+                                    obj,
+                                    rotation_matrix,
+                                    face_vertex_indices=face_vertex_indices,
+                                    expected_vertex_count=expected_vertex_count,
+                                )
+                                apply_object_rotation_and_scale(obj)
+                                print(f"Baked scale/rotation into {splat_count:,} splats on '{obj.name}'.")
+                                if sh_degree > 0:
+                                    print(f"Rotated SH attributes up to degree {sh_degree}.")
+                                else:
+                                    print("No higher SH attributes found to rotate.")
+                                print(
+                                    "Applied object rotation/scale to mesh and reset object transforms "
+                                    f"(object rotation quaternion was {rotation_quat.w:.6f}, {rotation_quat.x:.6f}, "
+                                    f"{rotation_quat.y:.6f}, {rotation_quat.z:.6f})."
+                                )
+                                print("3DGS transform bake completed.")
+                            main()
+                            source_obj_name = bpy.context.view_layer.objects.active.name
+                            start_frame = bpy.context.scene.frame_start
+                            end_frame = bpy.context.scene.frame_end
+                            RIG_BAKED_UPDATE_MODE = bpy.context.scene.sna_dgs_scene_properties.r2_render_rig_cache_mode
+                            output_object_list = None
+                            import inspect
+                            import sys
+                            #source_obj_name = ""  # Input: source mesh object name; blank = active object
+                            #start_frame = None  # Input: first frame to duplicate; blank/None = scene frame_start
+                            #end_frame = None  # Input: last frame to duplicate; blank/None = scene frame_end
+                            frame_step = 1  # Input: duplicate every Nth frame
+                            #RIG_BAKED_UPDATE_MODE = "None"  # Input: None, Enabled Baked, or All Baked
+                            RIG_BAKED_ENABLED_PROP_NAME = "rig_baked_render_enabled"  # Input: source object custom property checked when mode is Enabled Baked
+                            MISSING_BAKED_FRAME_MODE = "Keep Current"  # Input: Keep Current, Skip Frame, Restore Rest, or Error
+                            proxy_binding_utils_path = "D:/GithubRepos/3DGS Render_Render Updates/rigging/proxy_binding_utils.py"  # Input: full path to proxy_binding_utils.py
+                            raise_on_error = False  # Input: when False, missing/corrupt baked data reports softly instead of raising
+                            output_object_list = []
+                            success = False
+                            status_message = ""
+                            generated_count = 0
+                            processed_frame_count = 0
+                            skipped_frame_count = 0
+                            failed_frame_count = 0
+                            rig_applied_frame_count = 0
+                            rig_missing_frame_count = 0
+                            used_baked_rig_updates = False
+
+                            def load_proxy_binding_utils():
+                                module_name = "proxy_binding_utils"
+                                candidate_paths = []
+                                override_path = str(proxy_binding_utils_path).strip()
+                                if override_path:
+                                    candidate_paths.append(os.path.abspath(bpy.path.abspath(override_path)))
+                                file_hint = globals().get("__file__") or inspect.getsourcefile(lambda: 0)
+                                if file_hint and os.path.exists(file_hint):
+                                    script_dir = os.path.dirname(os.path.abspath(file_hint))
+                                    candidate_paths.append(os.path.join(script_dir, "proxy_binding_utils.py"))
+                                    candidate_paths.append(os.path.join(script_dir, "..", "rigging", "proxy_binding_utils.py"))
+                                cwd = os.getcwd()
+                                candidate_paths.append(os.path.join(cwd, "proxy_binding_utils.py"))
+                                candidate_paths.append(os.path.join(cwd, "rigging", "proxy_binding_utils.py"))
+                                blend_dir = bpy.path.abspath("//")
+                                if blend_dir:
+                                    candidate_paths.append(os.path.join(blend_dir, "proxy_binding_utils.py"))
+                                    candidate_paths.append(os.path.join(blend_dir, "rigging", "proxy_binding_utils.py"))
+                                checked_paths = set()
+                                for module_path in candidate_paths:
+                                    normalized = os.path.normpath(module_path)
+                                    if normalized in checked_paths:
+                                        continue
+                                    checked_paths.add(normalized)
+                                    if os.path.exists(normalized):
+                                        spec = importlib.util.spec_from_file_location(module_name, normalized)
+                                        module = importlib.util.module_from_spec(spec)
+                                        spec.loader.exec_module(module)
+                                        sys.modules[module_name] = module
+                                        return module
+                                text_name_candidates = (
+                                    "proxy_binding_utils.py",
+                                    "Rigging - proxy_binding_utils.py",
+                                    "proxy_binding_utils",
+                                    "Rigging - proxy_binding_utils",
+                                )
+                                for text_name in text_name_candidates:
+                                    text_block = bpy.data.texts.get(text_name)
+                                    if text_block:
+                                        module = types.ModuleType(module_name)
+                                        module.__file__ = text_name
+                                        exec(compile(text_block.as_string(), text_name, "exec"), module.__dict__)
+                                        sys.modules[module_name] = module
+                                        return module
+                                raise RuntimeError(
+                                    "Could not find proxy_binding_utils.py. Set 'proxy_binding_utils_path' to the helper file on disk "
+                                    "or load proxy_binding_utils.py as a Blender text block."
+                                )
+
+                            def get_source_object():
+                                obj_name = str(source_obj_name).strip()
+                                if obj_name:
+                                    obj = bpy.data.objects.get(obj_name)
+                                    if obj is None:
+                                        raise ValueError(f"Object '{obj_name}' not found.")
+                                else:
+                                    obj = bpy.context.view_layer.objects.active
+                                    if obj is None:
+                                        raise ValueError("No active object found and source_obj_name is blank.")
+                                if obj.type != "MESH":
+                                    raise ValueError(f"Object '{obj.name}' is not a mesh.")
+                                return obj
+
+                            def normalize_rig_baked_update_mode(value):
+                                text = str(value).strip().lower()
+                                if text in {"", "none"}:
+                                    return "None"
+                                if text in {"enabled baked", "enabled_baked", "enabled"}:
+                                    return "Enabled Baked"
+                                if text in {"all baked", "all_baked", "all"}:
+                                    return "All Baked"
+                                raise ValueError("RIG_BAKED_UPDATE_MODE must be None, Enabled Baked, or All Baked.")
+
+                            def normalize_missing_baked_frame_mode(value):
+                                text = str(value).strip().lower()
+                                if text in {"", "keep current", "keep_current", "keep"}:
+                                    return "Keep Current"
+                                if text in {"skip frame", "skip_frame", "skip"}:
+                                    return "Skip Frame"
+                                if text in {"restore rest", "restore_rest", "rest"}:
+                                    return "Restore Rest"
+                                if text in {"error", "raise"}:
+                                    return "Error"
+                                raise ValueError(
+                                    "MISSING_BAKED_FRAME_MODE must be Keep Current, Skip Frame, Restore Rest, or Error."
+                                )
+
+                            def resolve_frame_range(scene):
+                                resolved_start = int(scene.frame_start if start_frame in (None, "") else start_frame)
+                                resolved_end = int(scene.frame_end if end_frame in (None, "") else end_frame)
+                                resolved_step = max(1, int(frame_step))
+                                if resolved_end < resolved_start:
+                                    raise ValueError("end_frame must be greater than or equal to start_frame.")
+                                return resolved_start, resolved_end, resolved_step
+
+                            def duplicate_evaluated_mesh(source_obj, collection, depsgraph, frame_number):
+                                eval_obj = source_obj.evaluated_get(depsgraph)
+                                new_mesh = bpy.data.meshes.new_from_object(eval_obj)
+                                new_obj = bpy.data.objects.new(f"{source_obj.name}_baked_f{frame_number}", new_mesh)
+                                new_obj.matrix_world = source_obj.matrix_world.copy()
+                                collection.objects.link(new_obj)
+                                return new_obj
+                            scene = bpy.context.scene
+                            collection = scene.collection
                             try:
-                                bpy.ops.object.modifier_apply(modifier=modifier.name)
-                                print(f"Applied modifier: {modifier.name}")
-                            except Exception as e:
-                                print(f"Failed to apply modifier {modifier.name}: {str(e)}")
-                    else:
-                        print(f"Object '{object_name}' not found")
-                    if False:
-                        bpy.context.view_layer.objects.active.location = (0.0, 0.0, 0.0)
-                    APPLY_SCALE = True
-                    APPLY_ROTATION = True
-                    TRANSFORM_ORDER = 'ROTATION_FIRST'
-                    import numpy as np
-                    from mathutils import Quaternion, Matrix, Euler
-                    #------ INPUT VARIABLES (modify these) ------#
-                    # The attributes to update
-                    SCALE_ATTRIBUTES = ["scale_0", "scale_1", "scale_2"]
-                    ROTATION_ATTRIBUTES = ["rot_0", "rot_1", "rot_2", "rot_3"]
-                    # Whether to apply transformations after updating attributes
-                    #APPLY_SCALE = True
-                    #APPLY_ROTATION = True
-                    # The order of operations: either "SCALE_FIRST" or "ROTATION_FIRST"
-                    # 3DGS typically uses SCALE_FIRST (scale, then rotate)
-                    #TRANSFORM_ORDER = "SCALE_FIRST"
-                    # Whether to print debug information
-                    VERBOSE = True
-                    # Whether to normalize quaternions after transformation (PostShot does this)
-                    NORMALIZE_QUATERNIONS = True
-                    #------------------------------------------#
-
-                    def quaternion_multiply(q1, q2):
-                        """
-                        Multiply two quaternions (compose rotations)
-                        q1 and q2 are in form [w, x, y, z]
-                        """
-                        w1, x1, y1, z1 = q1
-                        w2, x2, y2, z2 = q2
-                        w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
-                        x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
-                        y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
-                        z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
-                        return [w, x, y, z]
-
-                    def normalize_quaternion(q):
-                        """
-                        Normalize a quaternion to unit length
-                        q is in form [w, x, y, z]
-                        """
-                        magnitude = math.sqrt(q[0]**2 + q[1]**2 + q[2]**2 + q[3]**2)
-                        if magnitude > 0.00001:  # Avoid division by near-zero
-                            return [q[0]/magnitude, q[1]/magnitude, q[2]/magnitude, q[3]/magnitude]
-                        else:
-                            return [1.0, 0.0, 0.0, 0.0]  # Default to identity quaternion
-
-                    def update_scale_attributes(obj, scale_attributes, log_scale_factors, verbose=False):
-                        """
-                        Update the scale attributes with logarithmic scale factors
-                        """
-                        success = True
-                        for attr_idx, attr_name in enumerate(scale_attributes):
-                            if attr_name not in obj.data.attributes:
-                                print(f"Attribute '{attr_name}' not found on object.")
+                                source_obj = get_source_object()
+                                rig_baked_update_mode = normalize_rig_baked_update_mode(RIG_BAKED_UPDATE_MODE)
+                                missing_baked_frame_mode = normalize_missing_baked_frame_mode(MISSING_BAKED_FRAME_MODE)
+                                resolved_start, resolved_end, resolved_step = resolve_frame_range(scene)
+                                frame_numbers = list(range(resolved_start, resolved_end + 1, resolved_step))
+                                print(f"Duplicating evaluated mesh '{source_obj.name}' for {len(frame_numbers)} frame(s)...")
+                                print(
+                                    f"Rig baked settings: Mode={rig_baked_update_mode}, "
+                                    f"MissingFrame={missing_baked_frame_mode}, EnabledProp={RIG_BAKED_ENABLED_PROP_NAME}"
+                                )
+                                original_frame = int(scene.frame_current)
+                                original_hide_viewport = bool(source_obj.hide_viewport)
+                                depsgraph = bpy.context.evaluated_depsgraph_get()
+                                proxy_utils = None
+                                rig_should_apply = False
+                                rig_paths = None
+                                rig_metadata = None
+                                rig_rest_state = None
+                                original_3dgs_state = None
+                                if rig_baked_update_mode != "None":
+                                    proxy_utils = load_proxy_binding_utils()
+                                    if rig_baked_update_mode == "Enabled Baked":
+                                        rig_should_apply = bool(source_obj.get(RIG_BAKED_ENABLED_PROP_NAME, False))
+                                    else:
+                                        rig_should_apply = True
+                                    if rig_should_apply:
+                                        try:
+                                            if not proxy_utils.check_mesh_has_gaussian_attributes(source_obj):
+                                                raise proxy_utils.ProxyBindingError(
+                                                    f"'{source_obj.name}' does not look like a valid mesh 3DGS object."
+                                                )
+                                            original_3dgs_state = proxy_utils.read_logical_gaussian_state(source_obj)
+                                            rig_paths, rig_metadata, rig_rest_state, _ = proxy_utils.load_binding_package(source_obj)
+                                            proxy_utils.validate_current_3dgs_object(source_obj, rig_metadata)
+                                            used_baked_rig_updates = True
+                                            print(f"Baked rig package found for '{source_obj.name}'.")
+                                        except Exception as exc:
+                                            used_baked_rig_updates = False
+                                            rig_should_apply = False
+                                            print(f"Rig baked updates disabled for '{source_obj.name}': {exc}")
+                                            if raise_on_error:
+                                                raise
+                                    else:
+                                        print(f"Rig baked updates not enabled for '{source_obj.name}'.")
+                                try:
+                                    if original_hide_viewport:
+                                        source_obj.hide_viewport = False
+                                    for frame_number in frame_numbers:
+                                        scene.frame_set(frame_number)
+                                        processed_frame_count += 1
+                                        if rig_should_apply:
+                                            bake_path = proxy_utils.bake_state_file_path(rig_paths["bake_dir"], frame_number)
+                                            if os.path.exists(bake_path):
+                                                state = proxy_utils.load_baked_state(rig_paths["bake_dir"], frame_number)
+                                                proxy_utils.apply_bound_state(source_obj, state)
+                                                rig_applied_frame_count += 1
+                                            else:
+                                                rig_missing_frame_count += 1
+                                                if missing_baked_frame_mode == "Skip Frame":
+                                                    skipped_frame_count += 1
+                                                    print(
+                                                        f"Skipping frame {frame_number}: no baked rig frame exists for '{source_obj.name}'."
+                                                    )
+                                                    continue
+                                                if missing_baked_frame_mode == "Restore Rest":
+                                                    proxy_utils.apply_bound_state(source_obj, rig_rest_state)
+                                                    print(
+                                                        f"Restored rest rig state for frame {frame_number} on '{source_obj.name}'."
+                                                    )
+                                                elif missing_baked_frame_mode == "Error":
+                                                    raise proxy_utils.ProxyBindingError(
+                                                        f"No baked rig frame exists for frame {frame_number} on '{source_obj.name}'."
+                                                    )
+                                                else:
+                                                    print(
+                                                        f"Keeping current rig state for frame {frame_number}: no baked rig frame exists "
+                                                        f"for '{source_obj.name}'."
+                                                    )
+                                        bpy.context.view_layer.update()
+                                        new_obj = duplicate_evaluated_mesh(source_obj, collection, depsgraph, frame_number)
+                                        output_object_list.append(new_obj)
+                                        generated_count += 1
+                                    success = failed_frame_count == 0
+                                    status_message = (
+                                        f"Generated {generated_count} duplicate object(s) from '{source_obj.name}'. "
+                                        f"Rig-applied frames: {rig_applied_frame_count}. "
+                                        f"Skipped frames: {skipped_frame_count}. Missing baked frames: {rig_missing_frame_count}."
+                                    )
+                                    print(status_message)
+                                finally:
+                                    if original_3dgs_state is not None:
+                                        try:
+                                            proxy_utils.write_logical_gaussian_state(source_obj, original_3dgs_state)
+                                        except Exception as restore_exc:
+                                            print(f"Warning: failed to restore original 3DGS state on '{source_obj.name}': {restore_exc}")
+                                    scene.frame_set(original_frame)
+                                    source_obj.hide_viewport = original_hide_viewport
+                                    bpy.context.view_layer.update()
+                            except Exception as exc:
+                                status_message = f"Export duplicate-per-frame failed: {exc}"
+                                failed_frame_count = max(failed_frame_count, 1)
+                                print(status_message)
+                                if raise_on_error:
+                                    raise
+                            for i_4588B in range(len(output_object_list)):
+                                input_object = output_object_list[i_4588B]
+                                # --- Input Variables (For testing or Serpens integration) ---
+                                #input_object = bpy.context.object  # The target object
+                                deselect_all_first = True          # Clear selection before starting?
+                                make_active = True                 # NEW: Toggle between just selecting or selecting + activating
+                                # --- Output Variables ---
                                 success = False
-                                continue
-                            attr = obj.data.attributes[attr_name]
-                            if verbose:
-                                print(f"\nUpdating attribute: {attr_name}")
-                                print(f"Data type: {attr.data_type}")
-                                print(f"Domain: {attr.domain}")
-                                print(f"Length: {len(attr.data)}")
-                            # Determine which scale factor to use based on attribute name
-                            if attr_name == "scale_0":
-                                log_scale = log_scale_factors[0]
-                            elif attr_name == "scale_1":
-                                log_scale = log_scale_factors[1]
-                            elif attr_name == "scale_2":
-                                log_scale = log_scale_factors[2]
-                            else:
-                                # For custom-named attributes, use the index in the scale_attributes list
-                                log_scale = log_scale_factors[min(attr_idx, 2)]
-                            if verbose:
-                                print(f"Using log scale factor: {log_scale}")
-                            # Update the attribute values
-                            if attr.data_type == 'FLOAT':
-                                # Sample a few values before and after for verification
-                                sample_size = min(5, len(attr.data))
-                                before_values = []
-                                for i in range(sample_size):
-                                    before_values.append(attr.data[i].value)
-                                # Update all values
-                                for i in range(len(attr.data)):
-                                    # In 3DGS, adding the log of the scale factor to the log-space scale value
-                                    attr.data[i].value += log_scale
-                                # Print sample values after update
-                                if verbose:
-                                    print("Sample values before and after update:")
-                                    for i in range(sample_size):
-                                        print(f"  [{i}]: {before_values[i]} -> {attr.data[i].value}")
-                            else:
-                                print(f"Attribute '{attr_name}' is not of type FLOAT (found {attr.data_type}). Skipping.")
-                                success = False
-                        return success
+                                error_message = ""
 
-                    def update_rotation_attributes(obj, rotation_attributes, blender_quat, verbose=False, normalize=True):
-                        """
-                        Update the rotation attributes with the object's rotation quaternion
-                        """
-                        # First, gather all data to avoid processing incomplete sets
-                        attribute_data = {}
-                        valid_attributes = True
-                        for attr_name in rotation_attributes:
-                            if attr_name not in obj.data.attributes:
-                                print(f"Attribute '{attr_name}' not found on object.")
-                                valid_attributes = False
-                                break
-                            attr = obj.data.attributes[attr_name]
-                            if attr.data_type != 'FLOAT':
-                                print(f"Attribute '{attr_name}' is not of type FLOAT (found {attr.data_type}). Skipping.")
-                                valid_attributes = False
-                                break
-                            # Store the attribute for processing
-                            attribute_data[attr_name] = attr
-                        if not valid_attributes:
-                            print("Unable to process rotation due to missing or invalid attributes.")
-                            return False
-                        # Sample a few values before the update for verification
-                        sample_size = min(5, len(attribute_data[rotation_attributes[0]].data))
-                        before_values = {attr_name: [] for attr_name in rotation_attributes}
-                        for attr_name in rotation_attributes:
-                            for i in range(sample_size):
-                                before_values[attr_name].append(attribute_data[attr_name].data[i].value)
-                        # Process all points
-                        num_points = len(attribute_data[rotation_attributes[0]].data)
-                        print(f"Processing {num_points} points...")
-                        for i in range(num_points):
-                            # Get current quaternion values [w, x, y, z]
-                            point_quat = [
-                                attribute_data[rotation_attributes[0]].data[i].value,  # w
-                                attribute_data[rotation_attributes[1]].data[i].value,  # x
-                                attribute_data[rotation_attributes[2]].data[i].value,  # y
-                                attribute_data[rotation_attributes[3]].data[i].value   # z
-                            ]
-                            # Apply rotation by multiplying quaternions
-                            # The order matters: PostShot appears to use the object_rotation * point_quat
-                            # format (rotating the local frame)
-                            new_quat = quaternion_multiply(blender_quat, point_quat)
-                            # Normalize the quaternion if requested (PostShot does this)
-                            if normalize:
-                                new_quat = normalize_quaternion(new_quat)
-                            # Enforce positive w component to match PostShot's convention
-                            # Since q and -q represent the same rotation, we can flip all signs if w is negative
-                            if new_quat[0] < 0:
-                                new_quat = [-q for q in new_quat]
-                            # Update attribute values
-                            attribute_data[rotation_attributes[0]].data[i].value = new_quat[0]  # w
-                            attribute_data[rotation_attributes[1]].data[i].value = new_quat[1]  # x
-                            attribute_data[rotation_attributes[2]].data[i].value = new_quat[2]  # y
-                            attribute_data[rotation_attributes[3]].data[i].value = new_quat[3]  # z
-                        # Print sample values after update for verification
-                        if verbose:
-                            print("\nSample values before and after update:")
-                            for i in range(sample_size):
-                                print(f"Point [{i}]:")
-                                for j, attr_name in enumerate(rotation_attributes):
-                                    print(f"  {attr_name}: {before_values[attr_name][i]} -> {attribute_data[attr_name].data[i].value}")
-                        return True
+                                def safe_deselect_all():
+                                    try:
+                                        view_layer = bpy.context.view_layer
+                                        for obj in bpy.context.selected_objects[:]:
+                                            if obj.name in view_layer.objects:
+                                                obj.select_set(False)
+                                        # Only clear active if we actually want to reset everything
+                                        if view_layer.objects.active:
+                                            view_layer.objects.active = None
+                                        return True, ""
+                                    except Exception as e:
+                                        return False, f"Deselect error: {str(e)}"
 
-                    def apply_transformations(obj, apply_rotation=False, apply_scale=False):
-                        """
-                        Apply the transformations to the object
-                        """
-                        if not (apply_rotation or apply_scale):
-                            return
-                        # Store current context
-                        original_mode = obj.mode
-                        # Switch to object mode if needed
-                        if original_mode != 'OBJECT':
-                            bpy.ops.object.mode_set(mode='OBJECT')
-                        # Apply transformations
-                        bpy.ops.object.transform_apply(
-                            location=False, 
-                            rotation=apply_rotation, 
-                            scale=apply_scale
-                        )
-                        # Restore original mode
-                        if original_mode != 'OBJECT':
-                            bpy.ops.object.mode_set(mode=original_mode)
-                        transformations = []
-                        if apply_rotation:
-                            transformations.append("rotation")
-                        if apply_scale:
-                            transformations.append("scale")
-                        print(f"Object {', '.join(transformations)} applied.")
-                    # MAIN SCRIPT EXECUTION
-                    # Get the active object
-                    obj = bpy.context.active_object
-                    if not obj:
-                        print("No active object found.")
-                    else:
-                        print(f"Processing 3DGS transformations for object: {obj.name}")
-                        # Get current object rotation (ensuring quaternion is updated)
-                        original_rotation_mode = obj.rotation_mode
-                        # If not already in quaternion mode, ensure the quaternion gets updated
-                        if original_rotation_mode != 'QUATERNION':
-                            # Switch to quaternion mode to ensure quaternion is updated
-                            obj.rotation_mode = 'QUATERNION'
-                            # Switch back to original mode
-                            obj.rotation_mode = original_rotation_mode
-                        # Get the quaternion values
-                        obj_rotation_quat = obj.rotation_quaternion.copy()
-                        # Convert to w, x, y, z format (from Blender's x, y, z, w)
-                        blender_quat = [obj_rotation_quat.w, obj_rotation_quat.x, 
-                                      obj_rotation_quat.y, obj_rotation_quat.z]
-                        if VERBOSE:
-                            print(f"Current object rotation quaternion [w,x,y,z]: {blender_quat}")
-                        # Get current object scale
-                        scale_x, scale_y, scale_z = obj.scale
-                        if VERBOSE:
-                            print(f"Current object scale: X={scale_x}, Y={scale_y}, Z={scale_z}")
-                        # Calculate the logarithm of scale factors
-                        log_scale_x = math.log(scale_x) if scale_x > 0 else 0
-                        log_scale_y = math.log(scale_y) if scale_y > 0 else 0
-                        log_scale_z = math.log(scale_z) if scale_z > 0 else 0
-                        log_scale_factors = [log_scale_x, log_scale_y, log_scale_z]
-                        if VERBOSE:
-                            print(f"Log scale factors: X={log_scale_x}, Y={log_scale_y}, Z={log_scale_z}")
-                        # Check if the object has attribute data
-                        if not hasattr(obj.data, "attributes"):
-                            print("Object does not have attribute data.")
+                                def select_object_logic(obj, should_activate):
+                                    if not obj:
+                                        return False, "No object provided"
+                                    try:
+                                        view_layer = bpy.context.view_layer
+                                        if obj.name not in view_layer.objects:
+                                            return False, f"Object '{obj.name}' not in current view layer"
+                                        # 1. Unhide Object
+                                        if obj.hide_viewport:
+                                            obj.hide_viewport = False
+                                        view_layer_obj = view_layer.objects[obj.name]
+                                        if view_layer_obj.hide_get():
+                                            view_layer_obj.hide_set(False)
+                                        # 2. Unhide Direct Parent Collections
+                                        for col in obj.users_collection:
+                                            if col.hide_viewport:
+                                                col.hide_viewport = False
+                                        # 3. Select 
+                                        view_layer_obj.select_set(True)
+                                        # 4. Conditionally Activate
+                                        if should_activate:
+                                            view_layer.objects.active = view_layer_obj
+                                            msg = f"Selected and activated {obj.name}"
+                                        else:
+                                            msg = f"Selected {obj.name} (Active object remains {view_layer.objects.active})"
+                                        return True, msg
+                                    except Exception as e:
+                                        return False, f"Selection error: {str(e)}"
+                                # --- Execution Logic ---
+                                # 1. Handle Deselection
+                                if deselect_all_first:
+                                    success, error_message = safe_deselect_all()
+                                else:
+                                    success = True # Skip deselect, proceed to selection
+                                # 2. Handle Selection
+                                if success:
+                                    if input_object:
+                                        success, error_message = select_object_logic(input_object, make_active)
+                                    else:
+                                        success = False
+                                        error_message = "No input object provided"
+                                print(f"Result -> Success: {success}, Message: {error_message}")
+                                bpy.ops.wm.ply_export(filepath=os.path.join(bpy.context.scene.sna_dgs_scene_properties.export_output_path,dgs_render__export['sna_export_base_object'].name + '_frame_000' + str(int(bpy.context.scene.frame_start + i_4588B)) + '.ply'), export_selected_objects=True, export_attributes=True)
+                            for i_C1E70 in range(len(output_object_list)):
+                                bpy.data.objects.remove(object=output_object_list[i_C1E70], do_unlink=True, do_id_user=True, do_ui_user=True, )
                         else:
-                            # Perform transformations in the specified order
-                            if TRANSFORM_ORDER == "SCALE_FIRST":
-                                # First update scale attributes
-                                scale_success = update_scale_attributes(obj, SCALE_ATTRIBUTES, log_scale_factors, VERBOSE)
-                                print("Scale attributes update", "succeeded" if scale_success else "failed")
-                                # Then update rotation attributes
-                                rotation_success = update_rotation_attributes(obj, ROTATION_ATTRIBUTES, blender_quat, VERBOSE, NORMALIZE_QUATERNIONS)
-                                print("Rotation attributes update", "succeeded" if rotation_success else "failed")
-                            else:  # ROTATION_FIRST
-                                # First update rotation attributes
-                                rotation_success = update_rotation_attributes(obj, ROTATION_ATTRIBUTES, blender_quat, VERBOSE, NORMALIZE_QUATERNIONS)
-                                print("Rotation attributes update", "succeeded" if rotation_success else "failed")
-                                # Then update scale attributes
-                                scale_success = update_scale_attributes(obj, SCALE_ATTRIBUTES, log_scale_factors, VERBOSE)
-                                print("Scale attributes update", "succeeded" if scale_success else "failed")
-                            # Apply transformations to reset object transforms
-                            apply_transformations(obj, APPLY_ROTATION, APPLY_SCALE)
-                            print("\nTransformation operations completed.")
-
-                    def delayed_5B08A():
-                        bpy.ops.wm.ply_export('INVOKE_DEFAULT', apply_modifiers=True, export_selected_objects=True, export_attributes=True)
-                    bpy.app.timers.register(delayed_5B08A, first_interval=0.10000000149011612)
+                            pass
+                        bpy.context.view_layer.objects.active = dgs_render__export['sna_export_base_object']
+                        dgs_render__export['sna_export_base_object'].modifiers['KIRI_3DGS_Write F_DC_And_Merge'].show_viewport = False
+                        dgs_render__export['sna_export_base_object'].modifiers['KIRI_3DGS_Write F_DC_And_Merge'].show_render = False
+                        if (property_exists("dgs_render__export['sna_export_base_object'].modifiers", globals(), locals()) and 'KIRI_3DGS_Render_GN' in dgs_render__export['sna_export_base_object'].modifiers):
+                            dgs_render__export['sna_export_base_object'].sna_dgs_object_properties.update_mode = 'Enable Camera Updates'
+                    else:
+                        self.report({'ERROR'}, message='Object is missing the KIRI_3DGS_Write F_DC_And_Merge Modifier')
+        else:
+            self.report({'ERROR'}, message='Output Directory is not valid')
         return {"FINISHED"}
 
     def draw(self, context):
         layout = self.layout
+        if (bpy.context.scene.sna_dgs_scene_properties.export_single_or_sequence == '4DGS'):
+            box_5A7F8 = layout.box()
+            box_5A7F8.alert = False
+            box_5A7F8.enabled = True
+            box_5A7F8.active = True
+            box_5A7F8.use_property_split = False
+            box_5A7F8.use_property_decorate = False
+            box_5A7F8.alignment = 'Expand'.upper()
+            box_5A7F8.scale_x = 1.0
+            box_5A7F8.scale_y = 1.0
+            if not True: box_5A7F8.operator_context = "EXEC_DEFAULT"
+            box_5A7F8.label(text='Exporting large scans as .PLY sequences is not recommended,', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+            box_5A7F8.label(text='        it can be best to export a cropped subset of points', icon_value=0)
+            box_5A7F8.label(text='        Exporting large numbers of frames can take a while', icon_value=0)
         box_44942 = layout.box()
         box_44942.alert = False
         box_44942.enabled = True
@@ -2766,16 +5355,68 @@ class SNA_OT_Dgs_Render_Export_Mesh_Object_As_3Dgs_Ply_Ce2F7(bpy.types.Operator)
         box_44942.scale_x = 1.0
         box_44942.scale_y = 1.0
         if not True: box_44942.operator_context = "EXEC_DEFAULT"
-        box_44942.label(text='All modifiers will be applied. To continue working in Blender', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
-        box_44942.label(text='         it is advised to make a duplicate before exporting.', icon_value=0)
-        box_44942.label(text='         Press OK to continue exporting', icon_value=0)
+        box_44942.label(text='Camera updates will be set to Disabled', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+        box_44942.label(text='        Any enabled Animate modifiers found will be set to Displace Only', icon_value=0)
+        box_44942.label(text='        3DGS Transforms will be applied to the input object', icon_value=0)
+        box_44942.label(text='        The World Centre will be the exported model origin', icon_value=0)
+        box_2A27F = layout.box()
+        box_2A27F.alert = False
+        box_2A27F.enabled = True
+        box_2A27F.active = True
+        box_2A27F.use_property_split = False
+        box_2A27F.use_property_decorate = False
+        box_2A27F.alignment = 'Expand'.upper()
+        box_2A27F.scale_x = 1.0
+        box_2A27F.scale_y = 1.0
+        if not True: box_2A27F.operator_context = "EXEC_DEFAULT"
+        box_2A27F.prop(self, 'sna_send_to_world_centre', text='Reset Position (Rig locked objects ignore this)', icon_value=0, emboss=True)
 
     def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self, width=400)
+        return context.window_manager.invoke_props_dialog(self, width=500)
+
+
+def sna_apply_all_modifiers_for_export_B90C0(Target_Object):
+    if (property_exists("bpy.data.objects[Target_Object].modifiers", globals(), locals()) and 'KIRI_3DGS_Render_GN' in bpy.data.objects[Target_Object].modifiers):
+        bpy.data.objects[Target_Object].modifiers['KIRI_3DGS_Render_GN']['Socket_50'] = 1
+    if (property_exists("bpy.data.objects[Target_Object].modifiers", globals(), locals()) and 'KIRI_3DGS_Animate_GN' in bpy.data.objects[Target_Object].modifiers):
+        if bpy.data.objects[Target_Object].modifiers['KIRI_3DGS_Animate_GN'].show_viewport:
+            if ((bpy.data.objects[Target_Object].modifiers['KIRI_3DGS_Animate_GN']['Socket_26'] == 1) or (bpy.data.objects[Target_Object].modifiers['KIRI_3DGS_Animate_GN']['Socket_26'] == 2)):
+                bpy.data.objects[Target_Object].modifiers['KIRI_3DGS_Animate_GN']['Socket_26'] = 0
+    bpy.context.view_layer.objects.active.update_tag(refresh={'DATA'}, )
+    if bpy.context and bpy.context.screen:
+        for a in bpy.context.screen.areas:
+            a.tag_redraw()
+    object_name = Target_Object
+    # Replace this with your Serpens input or variable
+    # object_name = "Cube"
+    obj = bpy.data.objects.get(object_name)
+    if obj:
+        # 1. Store the NAMES as plain strings, not the RNA structs
+        modifier_names = [m.name for m in obj.modifiers] 
+        for mod_name in modifier_names: 
+            # 2. Fetch a fresh, live reference to the modifier on each iteration
+            modifier = obj.modifiers.get(mod_name)
+            # Failsafe in case a modifier was destroyed by a previous operation
+            if not modifier:
+                continue 
+            if not modifier.show_viewport:
+                # Safely remove hidden modifiers via data operation
+                obj.modifiers.remove(modifier)
+                print(f"Removed hidden modifier: {mod_name}")
+            else:
+                # Apply visible modifiers using an isolated context override
+                try:
+                    with bpy.context.temp_override(object=obj, active_object=obj):
+                        bpy.ops.object.modifier_apply(modifier=mod_name)
+                    print(f"Applied visible modifier: {mod_name}")
+                except Exception as e:
+                    print(f"Failed to apply modifier '{mod_name}'. Error: {e}")
+    else:
+        print(f"Object '{object_name}' not found.")
 
 
 def sna_hq_mode_function_interface_17C41(layout_function, ):
-    if (bpy.context.scene.render.engine == 'BLENDER_EEVEE_NEXT'):
+    if (bpy.context.scene.render.engine == 'BLENDER_EEVEE'):
         pass
     else:
         box_5B434 = layout_function.box()
@@ -2788,7 +5429,7 @@ def sna_hq_mode_function_interface_17C41(layout_function, ):
         box_5B434.scale_x = 1.0
         box_5B434.scale_y = 1.0
         if not True: box_5B434.operator_context = "EXEC_DEFAULT"
-        box_5B434.label(text='Eevee is not enabled', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
+        box_5B434.label(text='Eevee is not enabled', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
     if (bpy.context.scene.camera == None):
         box_9AC8C = layout_function.box()
         box_9AC8C.alert = False
@@ -2800,7 +5441,7 @@ def sna_hq_mode_function_interface_17C41(layout_function, ):
         box_9AC8C.scale_x = 1.0
         box_9AC8C.scale_y = 1.0
         if not True: box_9AC8C.operator_context = "EXEC_DEFAULT"
-        box_9AC8C.label(text='No Active Camera', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
+        box_9AC8C.label(text='No Active Camera', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
         box_9AC8C.label(text='         HQ Materials Require An Active Camera', icon_value=0)
     col_249D2 = layout_function.column(heading='', align=False)
     col_249D2.alert = False
@@ -2812,7 +5453,7 @@ def sna_hq_mode_function_interface_17C41(layout_function, ):
     col_249D2.scale_y = 1.0
     col_249D2.alignment = 'Expand'.upper()
     col_249D2.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
-    if bpy.context.scene.sna_dgs_scene_properties.show_tips:
+    if bpy.context.preferences.addons[__package__].preferences.sna_show_tips:
         box_AEE3F = col_249D2.box()
         box_AEE3F.alert = False
         box_AEE3F.enabled = True
@@ -2823,7 +5464,7 @@ def sna_hq_mode_function_interface_17C41(layout_function, ):
         box_AEE3F.scale_x = 1.0
         box_AEE3F.scale_y = 1.0
         if not True: box_AEE3F.operator_context = "EXEC_DEFAULT"
-        box_AEE3F.label(text='LQ Mode requires high samples (64+)', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
+        box_AEE3F.label(text='LQ Mode requires high samples', icon_value=0)
         box_AEE3F.label(text='Samples can be set to 1 in HQ Mode', icon_value=0)
         box_AEE3F.label(text="if 'Shadeless' materials are used", icon_value=0)
     if bpy.context.scene.eevee.use_taa_reprojection:
@@ -2837,8 +5478,8 @@ def sna_hq_mode_function_interface_17C41(layout_function, ):
         box_06ADA.scale_x = 1.0
         box_06ADA.scale_y = 1.0
         if not True: box_06ADA.operator_context = "EXEC_DEFAULT"
-        box_06ADA.label(text='Temporal Reprojection is a enabled ', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
-        box_06ADA.label(text='         This can cause flickering', icon_value=0)
+        box_06ADA.label(text='Temporal Reprojection is enabled ', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+        box_06ADA.label(text='This can cause flickering', icon_value=0)
     box_0F8BF = col_249D2.box()
     box_0F8BF.alert = False
     box_0F8BF.enabled = True
@@ -2849,7 +5490,7 @@ def sna_hq_mode_function_interface_17C41(layout_function, ):
     box_0F8BF.scale_x = 1.0
     box_0F8BF.scale_y = 1.0
     if not True: box_0F8BF.operator_context = "EXEC_DEFAULT"
-    col_E83D4 = box_0F8BF.column(heading='', align=False)
+    col_E83D4 = box_0F8BF.column(heading='', align=True)
     col_E83D4.alert = False
     col_E83D4.enabled = True
     col_E83D4.active = True
@@ -2937,7 +5578,7 @@ def sna_hq_mode_function_interface_17C41(layout_function, ):
             box_BEFDD.scale_x = 1.0
             box_BEFDD.scale_y = 1.0
             if not True: box_BEFDD.operator_context = "EXEC_DEFAULT"
-            box_BEFDD.label(text='HQ Object Already Exists', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
+            box_BEFDD.label(text='HQ Object Already Exists', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
             op = box_BEFDD.operator('sna.dgs_render_generate_hq_object_55455', text='Generate HQ Object', icon_value=0, emboss=True, depress=False)
         else:
             op = box_0826A.operator('sna.dgs_render_generate_hq_object_55455', text='Generate HQ Object', icon_value=0, emboss=True, depress=False)
@@ -2981,7 +5622,7 @@ class SNA_OT_Dgs_Render_Generate_Hq_Object_55455(bpy.types.Operator):
                     bpy.data.objects[dgs_render__hq_mode['sna_lq_object_list'][i_6C743]].hide_render = True
                     sna_move_object_to_collection_create_if_missingfunction_execute_AB682(dgs_render__hq_mode['sna_lq_object_list'][i_6C743], '3DGS_LQ_Objects', 'COLOR_06')
                 before_data = list(bpy.data.objects)
-                bpy.ops.wm.append(directory=os.path.join(os.path.dirname(__file__), 'assets', '3DGS Render APPEND V4.blend') + r'\Object', filename='KIRI_HQ_Merged_Object', link=False)
+                bpy.ops.wm.append(directory=os.path.join(os.path.dirname(__file__), 'assets', '3DGS Render APPEND V5.blend') + r'\Object', filename='KIRI_HQ_Merged_Object', link=False)
                 new_data = list(filter(lambda d: not d in before_data, list(bpy.data.objects)))
                 appended_D9EAC = None if not new_data else new_data[0]
                 sna_move_object_to_collection_create_if_missingfunction_execute_AB682('KIRI_HQ_Merged_Object', '3DGS_HQ_Object', 'COLOR_05')
@@ -2991,7 +5632,7 @@ class SNA_OT_Dgs_Render_Generate_Hq_Object_55455(bpy.types.Operator):
                     pass
                 else:
                     before_data = list(bpy.data.materials)
-                    bpy.ops.wm.append(directory=os.path.join(os.path.dirname(__file__), 'assets', '3DGS Render APPEND V4.blend') + r'\Material', filename='KIRI_3DGS_Render_Material', link=False)
+                    bpy.ops.wm.append(directory=os.path.join(os.path.dirname(__file__), 'assets', '3DGS Render APPEND V5.blend') + r'\Material', filename='KIRI_3DGS_Render_Material', link=False)
                     new_data = list(filter(lambda d: not d in before_data, list(bpy.data.materials)))
                     appended_061FB = None if not new_data else new_data[0]
                 input_object = bpy.data.objects['KIRI_HQ_Merged_Object']
@@ -3043,7 +5684,7 @@ class SNA_OT_Dgs_Render_Generate_Hq_Object_55455(bpy.types.Operator):
         box_B5524.scale_x = 1.0
         box_B5524.scale_y = 1.0
         if not True: box_B5524.operator_context = "EXEC_DEFAULT"
-        box_B5524.label(text="All original 'LQ' objects will be moved into '3DGS_LQ_Objects' collection", icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
+        box_B5524.label(text="All original 'LQ' objects will be moved into '3DGS_LQ_Objects' collection", icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
         box_B5524.label(text="        A new object -'KIRI_HQ_Merged_Object' - will be created", icon_value=0)
         box_B5524.label(text='        Use the LQ / HQ drop down to toggle between original and HQ object visibilities', icon_value=0)
         box_B5524.label(text='        Do not rename the created collections', icon_value=0)
@@ -3089,7 +5730,7 @@ class SNA_OT_Dgs_Render_Disable_Hq_Overlap_34678(bpy.types.Operator):
         box_2D485.scale_x = 1.0
         box_2D485.scale_y = 1.0
         if not True: box_2D485.operator_context = "EXEC_DEFAULT"
-        box_2D485.label(text='HQ Object Found In Scene', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
+        box_2D485.label(text='HQ Object Found In Scene', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
         box_2D485.label(text='        Remove It?', icon_value=0)
 
     def invoke(self, context, event):
@@ -3110,7 +5751,7 @@ def sna_dgs_render__main_function_menu_019C7(layout_function, ):
     if (bpy.context.view_layer.objects.active == None):
         pass
     else:
-        if ('update_rot_to_cam' in bpy.context.view_layer.objects.active and (bpy.context.scene.sna_dgs_scene_properties.active_mode == 'Edit')):
+        if (bpy.context.scene.sna_dgs_scene_properties.active_mode == 'Edit'):
             layout_function = box_BDC6F
             sna_active_3dgs_mesh_object_menu_9588F(layout_function, )
     box_DCCA2 = box_BDC6F.box()
@@ -3246,7 +5887,7 @@ def sna_update_camera_single_time_9EF18():
 
 
 def sna_mesh_to_3dgs_function_interface_8DDDC(layout_function, ):
-    if bpy.context.scene.sna_dgs_scene_properties.show_tips:
+    if bpy.context.preferences.addons[__package__].preferences.sna_show_tips:
         box_58AE4 = layout_function.box()
         box_58AE4.alert = False
         box_58AE4.enabled = True
@@ -3257,7 +5898,7 @@ def sna_mesh_to_3dgs_function_interface_8DDDC(layout_function, ):
         box_58AE4.scale_x = 1.0
         box_58AE4.scale_y = 1.0
         if not True: box_58AE4.operator_context = "EXEC_DEFAULT"
-        box_58AE4.label(text='Linux and Mac are not supported', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
+        box_58AE4.label(text='Linux and Mac are not supported', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
         box_58AE4.label(text='         The .OBJ mesh must be triangulated', icon_value=0)
         box_58AE4.label(text='         The colour image texture must be', icon_value=0)
         box_58AE4.label(text='         in the same folder as your .OBJ and .MTL', icon_value=0)
@@ -3514,6 +6155,101 @@ class SNA_OT_Dgs_Render_Mesh23Dgs_3Dfed(bpy.types.Operator, ImportHelper):
         return {"FINISHED"}
 
 
+def sna_r2_cleanup_menu_09B59(layout_function, ):
+    box_64A1D = layout_function.box()
+    box_64A1D.alert = False
+    box_64A1D.enabled = True
+    box_64A1D.active = True
+    box_64A1D.use_property_split = False
+    box_64A1D.use_property_decorate = False
+    box_64A1D.alignment = 'Expand'.upper()
+    box_64A1D.scale_x = 1.0
+    box_64A1D.scale_y = 1.0
+    if not True: box_64A1D.operator_context = "EXEC_DEFAULT"
+    box_64A1D.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_clear_empties', text='Delete All Proxy Empties', icon_value=0, emboss=True)
+    op = box_64A1D.operator('sna.dgs_render_clean_up_scene_80052', text='Clean Up Scene', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'trash.svg')), emboss=True, depress=False)
+
+
+class SNA_OT_Dgs_Render_Clean_Up_Scene_80052(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_clean_up_scene_80052"
+    bl_label = "3DGS Render: Clean Up Scene"
+    bl_description = "Stop advanced rendering and optionally delete all proxy empties."
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        sna_clean_up_scene_5F1F1(bpy.context.scene.sna_dgs_scene_properties.r2_clear_empties)
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+class SNA_OT_Dgs_Render_Create_Proxy_From_Mesh_Eafbb(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_create_proxy_from_mesh_eafbb"
+    bl_label = "3DGS Render: Create Proxy From Mesh"
+    bl_description = "Create a Proxy Empty from the active 3DGS mesh. The mesh must not be hidden."
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        exec('import os')
+        sna_b2_load_from_blender_object_F0CCB(bpy.context.view_layer.objects.active.name + 'Splat_Proxy')
+        sna_shader_system_A4AED()
+        sna_texture_creation_FD1B2()
+        sna_viewport_render_A3941(bpy.context.scene.sna_dgs_scene_properties.r2_sh_degree, bpy.context.scene.sna_dgs_scene_properties.r2_sort_threshold)
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+def sna_r2_create_menu_03F72(layout_function, ):
+    col_1D306 = layout_function.column(heading='', align=False)
+    col_1D306.alert = False
+    col_1D306.enabled = True
+    col_1D306.active = True
+    col_1D306.use_property_split = False
+    col_1D306.use_property_decorate = False
+    col_1D306.scale_x = 1.0
+    col_1D306.scale_y = 1.0
+    col_1D306.alignment = 'Expand'.upper()
+    col_1D306.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+    box_B3EB2 = col_1D306.box()
+    box_B3EB2.alert = False
+    box_B3EB2.enabled = (not (bpy.context.view_layer.objects.active == None))
+    box_B3EB2.active = True
+    box_B3EB2.use_property_split = False
+    box_B3EB2.use_property_decorate = False
+    box_B3EB2.alignment = 'Expand'.upper()
+    box_B3EB2.scale_x = 1.0
+    box_B3EB2.scale_y = 1.0
+    if not True: box_B3EB2.operator_context = "EXEC_DEFAULT"
+    op = box_B3EB2.operator('sna.dgs_render_create_proxy_from_mesh_eafbb', text='Create Proxy From Visible Active Object', icon_value=0, emboss=True, depress=False)
+    if (bpy.context.view_layer.objects.active == None):
+        box_8209B = col_1D306.box()
+        box_8209B.alert = False
+        box_8209B.enabled = True
+        box_8209B.active = True
+        box_8209B.use_property_split = False
+        box_8209B.use_property_decorate = False
+        box_8209B.alignment = 'Expand'.upper()
+        box_8209B.scale_x = 1.0
+        box_8209B.scale_y = 1.0
+        if not True: box_8209B.operator_context = "EXEC_DEFAULT"
+        box_8209B.label(text='No Active Object', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+
+
 def sna_clean_up_scene_5F1F1(REMOVE_ALL_GAUSSIAN_OBJECTS):
     REMOVE_ALL_GAUSSIAN_OBJECTS = REMOVE_ALL_GAUSSIAN_OBJECTS
     # ========== VARIABLES (EDIT THESE) ==========
@@ -3660,119 +6396,89 @@ def sna_render_temp_scene_913CD(RENDER_ANIMATION, FRAME_STEP):
     FRAME_STEP = FRAME_STEP
     ACTUAL_RENDER_PATH = None
     # ========== VARIABLES (EDIT THESE) ==========
-    # NOTE: Output path is now determined by your Scene Output Settings in Blender Properties panel
-    RENDER_WIDTH = 0          # 0 = use scene settings
-    RENDER_HEIGHT = 0         # 0 = use scene settings
-    #RENDER_ANIMATION = False     # True = render animation frames
-    START_FRAME = 0              # 0 = use scene frame_start
-    END_FRAME = 0                # 0 = use scene frame_end
-    #FRAME_STEP = 1               # Render every Nth frame
-    CLEANUP_EXISTING_FILES = True # Remove old temp files before rendering
-    SAVE_COLOR = True            # Save color pass
-    SAVE_DEPTH = True            # Save Z-pass (needed for gaussian integration)
+    # NOTE: Temp output path is derived from your Scene Output settings and stored inside a _3dgs_temp subfolder
+    RENDER_WIDTH = 0           # 0 = use scene settings
+    RENDER_HEIGHT = 0          # 0 = use scene settings
+    #RENDER_ANIMATION = False  # True = render animation frames
+    START_FRAME = 0            # 0 = use scene frame_start
+    END_FRAME = 0              # 0 = use scene frame_end
+    #FRAME_STEP = 1            # Optional Serpens input if you expose stepped temp rendering later
+    CLEANUP_EXISTING_FILES = True  # Remove old temp files before rendering
+    SAVE_COLOR = True          # Save color pass
+    SAVE_DEPTH = True          # Save Z-pass (needed for gaussian integration)
     # ============================================
-    import os
-    import platform
-    import time
+    #import os
+    import tempfile
     # GLOBAL OUTPUT VARIABLE FOR SERPENS
     ACTUAL_RENDER_PATH = ""
+    TEMP_SUBFOLDER_NAME = "_3dgs_temp"
+    TEMP_COLOR_SLOT_PREFIX = "color_temp_"
+    TEMP_DEPTH_SLOT_PREFIX = "depth_temp_"
 
-    def get_safe_render_dir():
-        """Get the render directory from the active Scene Output settings."""
-        scene_path = bpy.context.scene.render.filepath
+    def is_supported_absolute_dir(path):
+        """Return True when a path is absolute for the current OS, not just root-relative."""
+        if not path:
+            return False
+        if platform.system() == "Windows":
+            drive, _ = os.path.splitdrive(path)
+            return bool(drive) or path.startswith("\\\\")
+        return os.path.isabs(path)
+
+    def get_safe_render_dir(scene=None):
+        """Get the base render directory from the active Scene Output settings."""
+        scene = scene or bpy.context.scene
+        scene_path = scene.render.filepath
         system_temp = os.path.join(tempfile.gettempdir(), "gaussian_render")
-        if not scene_path: return system_temp
-        # Handle Windows paths on Mac/Linux
-        system_is_windows = platform.system() == 'Windows'
-        path_is_windows_style = len(scene_path) > 1 and scene_path[1] == ':'
+        if not scene_path:
+            return system_temp
+        system_is_windows = platform.system() == "Windows"
+        path_is_windows_style = len(scene_path) > 1 and scene_path[1] == ":"
+        path_is_unsaved_relative = not bpy.data.filepath and scene_path.startswith("//")
         if not system_is_windows and path_is_windows_style:
             if not hasattr(get_safe_render_dir, "_warned"):
-                print(f"Mac/Linux detected with Windows path. Auto-switching to safe system path.")
+                print("Mac/Linux detected with a Windows render path. Using a safe temp folder instead.")
                 get_safe_render_dir._warned = True
+            return system_temp
+        if path_is_unsaved_relative:
             return system_temp
         try:
             abs_path = bpy.path.abspath(scene_path)
             final_dir = os.path.dirname(abs_path)
-            if not final_dir: return system_temp
+            if not is_supported_absolute_dir(final_dir):
+                return system_temp
             return os.path.normpath(final_dir)
         except Exception:
             return system_temp
 
+    def get_temp_render_dir(scene=None):
+        """Store temp regular-scene renders under the main render directory."""
+        return os.path.join(get_safe_render_dir(scene), TEMP_SUBFOLDER_NAME)
+
+    def get_output_paths(frame_num, scene=None):
+        temp_dir = get_temp_render_dir(scene)
+        os.makedirs(temp_dir, exist_ok=True)
+        color_path = os.path.join(temp_dir, f"regular_color_{frame_num:04d}.exr")
+        depth_path = os.path.join(temp_dir, f"regular_depth_{frame_num:04d}.exr")
+        return color_path, depth_path
+
     def get_compositor_node_tree(scene):
         """Version-agnostic way to get the compositor node tree."""
-        try: scene.use_nodes = True
-        except: pass
-        # Blender 5.x Check
+        try:
+            scene.use_nodes = True
+        except Exception:
+            pass
         if hasattr(scene, "compositing_node_group"):
             if not scene.compositing_node_group:
                 tree = bpy.data.node_groups.new(name="Compositor", type="CompositorNodeTree")
                 scene.compositing_node_group = tree
             return scene.compositing_node_group
-        # Blender 4.x Check
         if hasattr(scene, "node_tree") and scene.node_tree:
             return scene.node_tree
         return None
 
-    def setup_render_for_regular_scene():
-        """Configure scene for regular mesh rendering"""
-        try:
-            scene = bpy.context.scene
-            # CRITICAL: Enable Z-Pass so the socket appears in Compositor
-            if "ViewLayer" in scene.view_layers:
-                scene.view_layers["ViewLayer"].use_pass_z = True
-            # Store original render settings
-            original_settings = {
-                'format': scene.render.image_settings.file_format,
-                'color_mode': scene.render.image_settings.color_mode,
-                'color_depth': scene.render.image_settings.color_depth,
-                'width': scene.render.resolution_x,
-                'height': scene.render.resolution_y,
-                'media_type': getattr(scene.render.image_settings, 'media_type', None)
-            }
-            # BLENDER 5 FIX: Set Media Type First
-            if hasattr(scene.render.image_settings, "media_type"):
-                try: scene.render.image_settings.media_type = 'IMAGE'
-                except: pass
-            scene.render.image_settings.file_format = 'OPEN_EXR'
-            scene.render.image_settings.color_mode = 'RGBA'
-            scene.render.image_settings.color_depth = '32'
-            if RENDER_WIDTH > 0 and RENDER_HEIGHT > 0:
-                scene.render.resolution_x = RENDER_WIDTH
-                scene.render.resolution_y = RENDER_HEIGHT
-            return original_settings
-        except Exception as e:
-            print(f"Error setting up render: {e}")
-            return None
-
-    def restore_render_settings(original_settings):
-        """Restore original render settings"""
-        try:
-            if not original_settings: return
-            scene = bpy.context.scene
-            if hasattr(scene.render.image_settings, "media_type") and original_settings.get('media_type'):
-                 scene.render.image_settings.media_type = original_settings['media_type']
-            scene.render.image_settings.file_format = original_settings['format']
-            scene.render.image_settings.color_mode = original_settings['color_mode']
-            scene.render.image_settings.color_depth = original_settings['color_depth']
-            if original_settings['width'] and original_settings['height']:
-                scene.render.resolution_x = original_settings['width']
-                scene.render.resolution_y = original_settings['height']
-        except Exception as e:
-            print(f"Error restoring render settings: {e}")
-
-    def get_output_paths(frame_num):
-        resolved_path = get_safe_render_dir()
-        os.makedirs(resolved_path, exist_ok=True)
-        color_path = os.path.join(resolved_path, f"regular_color_{frame_num:04d}.exr")
-        depth_path = os.path.join(resolved_path, f"regular_depth_{frame_num:04d}.exr")
-        return color_path, depth_path
-
     def add_file_output_slot(node, name, socket_type="FLOAT"):
-        """
-        Version-agnostic wrapper to add a slot to the File Output Node.
-        """
+        """Version-agnostic wrapper to add a slot to the File Output node."""
         target_socket = None
-        # Blender 5.0+ Logic
         if hasattr(node, "file_output_items"):
             try:
                 node.file_output_items.new(socket_type, name)
@@ -3784,174 +6490,374 @@ def sna_render_temp_scene_913CD(RENDER_ANIMATION, FRAME_STEP):
                     target_socket = node.inputs[-1]
             except Exception as e:
                 print(f"Failed adding slot (Blender 5): {e}")
-        # Blender 4.x Logic
         elif hasattr(node, "file_slots"):
             target_socket = node.file_slots.new(name)
         return target_socket
 
-    def extract_and_save_passes(frame_num):
-        try:
-            render_result = bpy.data.images.get('Render Result')
-            if not render_result: return False
-            color_path, depth_path = get_output_paths(frame_num)
-            output_dir = get_safe_render_dir()
-            # --- SAVE COLOR ---
-            if SAVE_COLOR:
-                try:
-                    color_image = render_result.copy()
-                    color_image.name = f"regular_color_{frame_num}"
-                    try: color_image.file_format = 'OPEN_EXR'
-                    except: pass 
-                    color_image.filepath_raw = color_path
-                    color_image.save()
-                    bpy.data.images.remove(color_image)
-                except Exception as e:
-                    print(f"Failed to save color: {e}")
-            # --- SAVE DEPTH ---
-            if SAVE_DEPTH:
-                try:
-                    scene = bpy.context.scene
-                    node_tree = get_compositor_node_tree(scene)
-                    if not node_tree: return False
-                    node_tree.nodes.clear()
-                    render_layers = node_tree.nodes.new('CompositorNodeRLayers')
-                    render_layers.location = (0, 0)
-                    file_output = node_tree.nodes.new('CompositorNodeOutputFile')
-                    file_output.location = (300, 0)
-                    # Format Config
-                    if hasattr(file_output.format, "media_type"):
-                        file_output.format.media_type = 'IMAGE'
-                    try: file_output.format.file_format = 'OPEN_EXR'
-                    except: file_output.format.file_format = 'OPEN_EXR_MULTILAYER'
-                    file_output.format.color_mode = 'BW'
-                    file_output.format.color_depth = '32'
-                    # Use a specific temp name for the slot
-                    # We save as 'depth_temp_' and then rename to 'regular_depth_XXXX'
-                    temp_slot_name = "depth_temp_"
-                    # --- SET PATHS (Hybrid) ---
-                    if hasattr(file_output, "directory"):
-                        file_output.directory = output_dir  # Blender 5
-                        # CRITICAL FIX: Clear default file name so it doesn't prepend
-                        if hasattr(file_output, "file_name"):
-                            file_output.file_name = "" 
-                    elif hasattr(file_output, "base_path"):
-                        file_output.base_path = output_dir  # Blender 4
-                    # --- ADD SLOT ---
-                    target_input = add_file_output_slot(file_output, temp_slot_name, "FLOAT")
-                    # --- LINK ---
-                    source_output = None
-                    possible_names = ["Depth", "Z"]
-                    for name in possible_names:
-                        if name in render_layers.outputs:
-                            source_output = render_layers.outputs[name]
-                            break
-                    if not source_output and len(render_layers.outputs) > 2:
-                        source_output = render_layers.outputs[2]
-                    if target_input and source_output:
-                        node_tree.links.new(source_output, target_input)
-                        # RENDER DEPTH
-                        bpy.ops.render.render()
-                        # === RENAME LOGIC (The Safety Catch) ===
-                        # Blender might save it as "depth_temp_.exr", "depth_temp_0001.exr", etc.
-                        # We look for ANY file that matches our temp prefix.
-                        renamed = False
-                        # 1. Exact Name Check (Common in Still Renders)
-                        exact_temp = os.path.join(output_dir, f"{temp_slot_name}.exr")
-                        if os.path.exists(exact_temp):
-                            if os.path.exists(depth_path): os.remove(depth_path)
-                            os.rename(exact_temp, depth_path)
-                            renamed = True
-                        # 2. Wildcard Check (If Blender added frame numbers anyway)
-                        if not renamed:
-                            for f in os.listdir(output_dir):
-                                if f.startswith(temp_slot_name) and f.endswith(".exr"):
-                                    old_file = os.path.join(output_dir, f)
-                                    if os.path.exists(depth_path): os.remove(depth_path)
-                                    os.rename(old_file, depth_path)
-                                    renamed = True
-                                    break # Stop after finding the first match
-                        if not renamed:
-                            print(f"Depth file generation failed. looked for {temp_slot_name}...")
-                    else:
-                        print("Could not link depth sockets")
-                except Exception as e:
-                    print(f"Failed to save depth: {e}")
-                    import traceback
-                    traceback.print_exc()
-            return True 
-        except Exception as e:
-            print(f"Error extracting passes: {e}")
-            return False
+    def make_unique_scene_name(base_name):
+        """Create a unique scene name for the temporary render copy."""
+        if base_name not in bpy.data.scenes:
+            return base_name
+        counter = 1
+        while f"{base_name}_{counter:03d}" in bpy.data.scenes:
+            counter += 1
+        return f"{base_name}_{counter:03d}"
 
-    def render_regular_frame(frame_num):
-        try:
-            scene = bpy.context.scene
-            if not scene.camera: return False
-            scene.frame_set(frame_num)
-            hidden_gaussians = []
-            for obj in bpy.data.objects:
-                if obj.get("is_gaussian_splat", False) and obj.visible_get():
-                    obj.hide_render = True
-                    hidden_gaussians.append(obj.name)
+    def make_unique_tree_name(base_name):
+        """Create a unique compositor node-tree name for temporary helper scenes."""
+        if base_name not in bpy.data.node_groups:
+            return base_name
+        counter = 1
+        while f"{base_name}_{counter:03d}" in bpy.data.node_groups:
+            counter += 1
+        return f"{base_name}_{counter:03d}"
+
+    def localize_temp_scene_compositor(source_scene, temp_scene):
+        """Detach shared compositor data so edits stay inside the temporary scene only."""
+        if hasattr(temp_scene, "compositing_node_group") and temp_scene.compositing_node_group:
+            if (
+                hasattr(source_scene, "compositing_node_group")
+                and source_scene.compositing_node_group
+                and temp_scene.compositing_node_group == source_scene.compositing_node_group
+            ):
+                temp_scene.compositing_node_group = temp_scene.compositing_node_group.copy()
+            return
+        if hasattr(temp_scene, "node_tree") and temp_scene.node_tree:
             try:
-                bpy.ops.render.render()
-                success = extract_and_save_passes(frame_num)
-                return success
-            finally:
-                for obj_name in hidden_gaussians:
-                    if obj_name in bpy.data.objects:
-                        bpy.data.objects[obj_name].hide_render = False
-        except Exception as e:
-            print(f"Render failed: {e}")
+                if hasattr(source_scene, "node_tree") and source_scene.node_tree and temp_scene.node_tree == source_scene.node_tree:
+                    temp_scene.node_tree = temp_scene.node_tree.copy()
+            except Exception:
+                pass
+
+    def capture_source_scene_state(scene):
+        """Remember user-owned scene state that the temporary render must not disturb."""
+        state = {
+            "frame_current": scene.frame_current,
+            "use_nodes": getattr(scene, "use_nodes", None),
+            "render_use_compositing": getattr(scene.render, "use_compositing", None),
+            "render_use_sequencer": getattr(scene.render, "use_sequencer", None),
+        }
+        if hasattr(scene, "compositing_node_group"):
+            state["compositing_node_group"] = scene.compositing_node_group
+        return state
+
+    def restore_source_scene_state(scene, state):
+        """Restore the user's compositor/render state after temporary rendering."""
+        if not scene or not state:
+            return
+        try:
+            scene.frame_set(state["frame_current"])
+        except Exception:
+            pass
+        if state.get("use_nodes") is not None:
+            try:
+                scene.use_nodes = state["use_nodes"]
+            except Exception:
+                pass
+        if state.get("render_use_compositing") is not None and hasattr(scene.render, "use_compositing"):
+            try:
+                scene.render.use_compositing = state["render_use_compositing"]
+            except Exception:
+                pass
+        if state.get("render_use_sequencer") is not None and hasattr(scene.render, "use_sequencer"):
+            try:
+                scene.render.use_sequencer = state["render_use_sequencer"]
+            except Exception:
+                pass
+        if "compositing_node_group" in state and hasattr(scene, "compositing_node_group"):
+            try:
+                scene.compositing_node_group = state["compositing_node_group"]
+            except Exception:
+                pass
+
+    def create_linked_temp_scene(source_scene):
+        """Create a linked scene copy. The temp compositor tree is created later from scratch."""
+        window = bpy.context.window
+        if not window:
+            raise RuntimeError("No Blender window context available to create a temporary render scene")
+        previous_scene = window.scene
+        window.scene = source_scene
+        bpy.ops.scene.new(type='LINK_COPY')
+        temp_scene = window.scene
+        temp_scene.name = make_unique_scene_name("3DGS_TEMP_RENDER")
+        window.scene = previous_scene
+        return temp_scene
+
+    def remove_temp_scene(temp_scene, fallback_scene):
+        """Delete the temporary scene once rendering is complete."""
+        temp_tree = None
+        if temp_scene:
+            try:
+                if hasattr(temp_scene, "compositing_node_group"):
+                    temp_tree = temp_scene.compositing_node_group
+                elif hasattr(temp_scene, "node_tree"):
+                    temp_tree = temp_scene.node_tree
+            except Exception:
+                temp_tree = None
+        window = bpy.context.window
+        if window and window.scene == temp_scene:
+            window.scene = fallback_scene
+        if temp_scene and temp_scene.name in bpy.data.scenes:
+            bpy.data.scenes.remove(temp_scene)
+        if temp_tree and temp_tree.users == 0:
+            try:
+                bpy.data.node_groups.remove(temp_tree)
+            except Exception:
+                pass
+
+    def setup_render_for_regular_scene(scene):
+        """Configure the temporary scene for regular mesh rendering."""
+        for view_layer in scene.view_layers:
+            try:
+                view_layer.use_pass_z = True
+            except Exception:
+                pass
+        if hasattr(scene.render.image_settings, "media_type"):
+            try:
+                scene.render.image_settings.media_type = "IMAGE"
+            except Exception:
+                pass
+        scene.render.image_settings.file_format = "OPEN_EXR"
+        scene.render.image_settings.color_mode = "RGBA"
+        scene.render.image_settings.color_depth = "32"
+        if RENDER_WIDTH > 0 and RENDER_HEIGHT > 0:
+            scene.render.resolution_x = RENDER_WIDTH
+            scene.render.resolution_y = RENDER_HEIGHT
+        if hasattr(scene.render, "use_compositing"):
+            scene.render.use_compositing = True
+        if hasattr(scene.render, "use_sequencer"):
+            scene.render.use_sequencer = False
+
+    def setup_temp_depth_compositor(scene):
+        """Build a compositor in the temp scene that only outputs the Z pass to files."""
+        if not SAVE_DEPTH:
+            return True
+        for view_layer in scene.view_layers:
+            try:
+                view_layer.use_pass_z = True
+            except Exception:
+                pass
+        if hasattr(scene, "compositing_node_group"):
+            node_tree = bpy.data.node_groups.new(
+                name=make_unique_tree_name("3DGS_TEMP_DEPTH"),
+                type="CompositorNodeTree",
+            )
+            scene.compositing_node_group = node_tree
+        else:
+            node_tree = get_compositor_node_tree(scene)
+        if not node_tree:
             return False
+        node_tree.nodes.clear()
+        node_tree.links.clear()
+        render_layers = node_tree.nodes.new("CompositorNodeRLayers")
+        render_layers.location = (0, 0)
+        try:
+            render_layers.scene = scene
+        except Exception:
+            pass
+        try:
+            if scene.view_layers:
+                render_layers.layer = scene.view_layers[0].name
+        except Exception:
+            pass
+        image_output = render_layers.outputs.get("Image") if hasattr(render_layers.outputs, "get") else None
+        if image_output is None and render_layers.outputs:
+            image_output = render_layers.outputs[0]
+        temp_dir = get_temp_render_dir(scene)
+        os.makedirs(temp_dir, exist_ok=True)
+        if SAVE_COLOR:
+            color_output = node_tree.nodes.new("CompositorNodeOutputFile")
+            color_output.location = (300, 120)
+            if hasattr(color_output.format, "media_type"):
+                try:
+                    color_output.format.media_type = "IMAGE"
+                except Exception:
+                    pass
+            try:
+                color_output.format.file_format = "OPEN_EXR"
+            except Exception:
+                color_output.format.file_format = "OPEN_EXR_MULTILAYER"
+            color_output.format.color_mode = "RGBA"
+            color_output.format.color_depth = "32"
+            if hasattr(color_output, "directory"):
+                color_output.directory = temp_dir
+                if hasattr(color_output, "file_name"):
+                    color_output.file_name = ""
+            elif hasattr(color_output, "base_path"):
+                color_output.base_path = temp_dir
+            color_input = add_file_output_slot(color_output, TEMP_COLOR_SLOT_PREFIX, "RGBA")
+            if image_output and color_input:
+                node_tree.links.new(image_output, color_input)
+                scene["3DGS_TEMP_COLOR_OUTPUT_AVAILABLE"] = True
+            else:
+                scene["3DGS_TEMP_COLOR_OUTPUT_AVAILABLE"] = False
+        else:
+            scene["3DGS_TEMP_COLOR_OUTPUT_AVAILABLE"] = False
+        file_output = node_tree.nodes.new("CompositorNodeOutputFile")
+        file_output.location = (300, -120)
+        if hasattr(file_output.format, "media_type"):
+            try:
+                file_output.format.media_type = "IMAGE"
+            except Exception:
+                pass
+        try:
+            file_output.format.file_format = "OPEN_EXR"
+        except Exception:
+            file_output.format.file_format = "OPEN_EXR_MULTILAYER"
+        file_output.format.color_mode = "BW"
+        file_output.format.color_depth = "32"
+        if hasattr(file_output, "directory"):
+            file_output.directory = temp_dir
+            if hasattr(file_output, "file_name"):
+                file_output.file_name = ""
+        elif hasattr(file_output, "base_path"):
+            file_output.base_path = temp_dir
+        target_input = add_file_output_slot(file_output, TEMP_DEPTH_SLOT_PREFIX, "FLOAT")
+        source_output = None
+        for name in ("Depth", "Z"):
+            if name in render_layers.outputs:
+                source_output = render_layers.outputs[name]
+                break
+        if not source_output and len(render_layers.outputs) > 2:
+            source_output = render_layers.outputs[2]
+        if not target_input or not source_output:
+            available_outputs = ", ".join(socket.name or "<unnamed>" for socket in render_layers.outputs)
+            print(f"Could not link depth sockets in the temporary compositor. Available outputs: {available_outputs}")
+            scene["3DGS_TEMP_DEPTH_OUTPUT_AVAILABLE"] = False
+            return True
+        node_tree.links.new(source_output, target_input)
+        scene["3DGS_TEMP_DEPTH_OUTPUT_AVAILABLE"] = True
+        return True
+
+    def cleanup_existing_temp_files(scene=None):
+        """Remove stale temp outputs before starting a new run."""
+        temp_dir = get_temp_render_dir(scene)
+        os.makedirs(temp_dir, exist_ok=True)
+        try:
+            for file_name in os.listdir(temp_dir):
+                file_path = os.path.join(temp_dir, file_name)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+        except Exception as e:
+            print(f"Temp cleanup warning: {e}")
+
+    def rename_latest_temp_output(prefix, target_path, label, scene=None):
+        """Rename Blender's newest file-output result to the stable temp filename."""
+        temp_dir = get_temp_render_dir(scene)
+        candidates = []
+        try:
+            for file_name in os.listdir(temp_dir):
+                if file_name.startswith(prefix) and file_name.endswith(".exr"):
+                    candidates.append(os.path.join(temp_dir, file_name))
+        except Exception:
+            candidates = []
+        if not candidates:
+            print(f"{label} file generation failed. Looked for files starting with {prefix}")
+            return False
+        latest_output = max(candidates, key=os.path.getmtime)
+        os.replace(latest_output, target_path)
+        return True
+
+    def extract_and_save_passes(frame_num, scene=None):
+        """Rename temporary compositor file outputs to stable color/depth paths."""
+        color_path, depth_path = get_output_paths(frame_num, scene)
+        success = True
+        color_output_available = True
+        if scene is not None:
+            color_output_available = bool(scene.get("3DGS_TEMP_COLOR_OUTPUT_AVAILABLE", True))
+        if SAVE_COLOR and color_output_available and not rename_latest_temp_output(
+            TEMP_COLOR_SLOT_PREFIX,
+            color_path,
+            "Color",
+            scene,
+        ):
+            success = False
+        depth_output_available = True
+        if scene is not None:
+            depth_output_available = bool(scene.get("3DGS_TEMP_DEPTH_OUTPUT_AVAILABLE", True))
+        if SAVE_DEPTH and depth_output_available and not rename_latest_temp_output(
+            TEMP_DEPTH_SLOT_PREFIX,
+            depth_path,
+            "Depth",
+            scene,
+        ):
+            success = False
+        return success
+
+    def render_regular_frame(frame_num, source_scene, temp_scene):
+        """Render one frame from the temp scene while hiding gaussian objects."""
+        if not temp_scene.camera:
+            temp_scene.camera = source_scene.camera
+        source_scene.frame_set(frame_num)
+        temp_scene.frame_set(frame_num)
+        hidden_gaussians = []
+        for obj in bpy.data.objects:
+            if obj.get("is_gaussian_splat", False) and obj.visible_get():
+                hidden_gaussians.append((obj, obj.hide_render))
+                obj.hide_render = True
+        try:
+            bpy.ops.render.render(scene=temp_scene.name, write_still=False, use_viewport=False)
+            return extract_and_save_passes(frame_num, temp_scene)
+        finally:
+            for obj, was_hide_render in hidden_gaussians:
+                if obj and obj.name in bpy.data.objects:
+                    obj.hide_render = was_hide_render
 
     def main_regular_render():
-        try:
-            scene = bpy.context.scene
-            if not scene.camera: return False, None
-            current_safe_path = get_safe_render_dir()
-            scene["3DGS_TEMP_PATH"] = current_safe_path
-            original_settings = setup_render_for_regular_scene()
-            if not original_settings: return False, current_safe_path
-            # Cleanup
-            if CLEANUP_EXISTING_FILES:
-                try:
-                    for f in os.listdir(current_safe_path):
-                        if f.startswith("regular_") and f.endswith(".exr"):
-                            os.remove(os.path.join(current_safe_path, f))
-                except: pass
-            success = False
-            try:
-                if RENDER_ANIMATION:
-                    start = START_FRAME if START_FRAME > 0 else scene.frame_start
-                    end = END_FRAME if END_FRAME > 0 else scene.frame_end
-                    frames = list(range(start, end + 1))
-                    all_good = True
-                    for f in frames:
-                        print(f"Processing Frame {f}...")
-                        if not render_regular_frame(f):
-                            all_good = False
-                    success = all_good
-                else:
-                    print(f"Processing Single Frame {scene.frame_current}...")
-                    success = render_regular_frame(scene.frame_current)
-            finally:
-                restore_render_settings(original_settings)
-            return success, current_safe_path
-        except Exception:
+        source_scene = bpy.context.scene
+        if not source_scene.camera:
             return False, None
+        temp_render_dir = get_temp_render_dir(source_scene)
+        os.makedirs(temp_render_dir, exist_ok=True)
+        source_scene["3DGS_TEMP_PATH"] = temp_render_dir
+        user_frame = source_scene.frame_current
+        source_state = capture_source_scene_state(source_scene)
+        temp_scene = None
+        try:
+            temp_scene = create_linked_temp_scene(source_scene)
+            localize_temp_scene_compositor(source_scene, temp_scene)
+            temp_scene.camera = source_scene.camera
+            temp_scene.render.filepath = source_scene.render.filepath
+            setup_render_for_regular_scene(temp_scene)
+            if not setup_temp_depth_compositor(temp_scene):
+                return False, temp_render_dir
+            if CLEANUP_EXISTING_FILES:
+                cleanup_existing_temp_files(source_scene)
+            success = False
+            if RENDER_ANIMATION:
+                start = START_FRAME if START_FRAME > 0 else source_scene.frame_start
+                end = END_FRAME if END_FRAME > 0 else source_scene.frame_end
+                frames = list(range(start, end + 1))
+                all_good = True
+                for frame_num in frames:
+                    print(f"Processing Frame {frame_num}...")
+                    if not render_regular_frame(frame_num, source_scene, temp_scene):
+                        all_good = False
+                success = all_good
+            else:
+                print(f"Processing Single Frame {source_scene.frame_current}...")
+                success = render_regular_frame(source_scene.frame_current, source_scene, temp_scene)
+            return success, temp_render_dir
+        except Exception as e:
+            print(f"Temp regular render failed: {e}")
+            return False, temp_render_dir
+        finally:
+            restore_source_scene_state(source_scene, source_state)
+            source_scene.frame_set(user_frame)
+            if temp_scene:
+                remove_temp_scene(temp_scene, source_scene)
     # ========== MAIN EXECUTION ==========
-    print("Starting regular scene render...")
+    print("Starting regular scene temp render with preserved user compositor...")
     render_success, ACTUAL_RENDER_PATH = main_regular_render()
     if render_success:
-        print("Regular scene render completed!")
-        print(f"Files saved to: {ACTUAL_RENDER_PATH}")
+        print("Regular scene temp render completed!")
+        print(f"Temp files saved to: {ACTUAL_RENDER_PATH}")
     else:
-        print("Regular scene render failed!")
+        print("Regular scene temp render failed!")
     return ACTUAL_RENDER_PATH
 
 
-def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WITH_TEMP, UPDATE_SOURCE_TRANSFORMS, REFRESH_EVALUATED_DATA, FRAME_STEP, TEMP_RENDER_PATH):
+def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WITH_TEMP, UPDATE_SOURCE_TRANSFORMS, REFRESH_EVALUATED_DATA, FRAME_STEP, DELETE_TEMP_FILES_AFTER_SUCCESS, RIG_BAKED_UPDATE_MODE, SH_DEGREE):
     RENDER_ANIMATION = RENDER_ANIMATION
     RENDER_GAUSSIAN = RENDER_COLOR
     RENDER_DEPTH = RENDER_DEPTH
@@ -3959,7 +6865,13 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
     UPDATE_SOURCE_TRANSFORMS = UPDATE_SOURCE_TRANSFORMS
     REFRESH_EVALUATED_DATA = REFRESH_EVALUATED_DATA
     FRAME_STEP = FRAME_STEP
-    TEMP_RENDER_PATH = TEMP_RENDER_PATH
+    SHADER_DIRECTORY = os.path.join(os.path.dirname(__file__), 'assets', 'shaders_sh_rotation_color_precision_display_fix')
+    DELETE_TEMP_FILES_AFTER_SUCCESS = DELETE_TEMP_FILES_AFTER_SUCCESS
+    RIG_BAKED_UPDATE_MODE = RIG_BAKED_UPDATE_MODE
+    SH_DEGREE = SH_DEGREE
+    proxy_binding_utils_path = os.path.join(os.path.dirname(__file__), 'assets', 'proxy_binding_utils.py')
+    proxy_deferred_layers_utils_path = os.path.join(os.path.dirname(__file__), 'assets', 'proxy_deferred_layers_utils.py')
+    relight_cache_root = bpy.context.preferences.addons[__package__].preferences.sna_cache_file_directory
     # ========== VARIABLES (EDIT THESE) ==========
     #RENDER_ANIMATION = False     # True = Animation, False = Single Frame
     RENDER_WIDTH = 0           # Render resolution width (0 = use scene settings)
@@ -3968,16 +6880,21 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
     #RENDER_GAUSSIAN = True        # Render gaussian/color pass
     #RENDER_DEPTH = False   # Render depth visualization pass
     RENDER_SURFEL = False         # Render surfel visualization pass
-    SH_DEGREE = 3                 # 0, 1, 2, or 3 (only affects gaussian pass)
+    #SH_DEGREE = 3                 # 0, 1, 2, or 3 (only affects gaussian pass)
     SAVE_TO_FILE = True           # Save render to file
     SAVE_AS_RENDER = True         # Apply Blender's color management when saving
     FORCE_DEPTH_SORT = True       # Force depth sorting for render camera (recommended)
+    #DELETE_TEMP_FILES_AFTER_SUCCESS = False    # Only remove temp regular-scene EXRs when the whole render succeeds
+    #RIG_BAKED_UPDATE_MODE = "None"             # None, Enabled Baked, or All Baked
+    RIG_BAKED_ENABLED_PROP_NAME = "rig_baked_render_enabled"  # Source mesh custom property toggle used by Enabled Baked mode
+    #proxy_binding_utils_path = "D:/GithubRepos/3DGS Render_Render Updates/rigging/proxy_binding_utils.py"  # Input: full path to proxy_binding_utils.py
     # COMPOSITING SETTINGS
     #USE_TEMP_RENDERS = True        # Use temp renders from script_7 for compositing
-    #TEMP_RENDER_PATH = r"C:\temp\gaussian_render"  # RESTORED: Serpens can inject the correct path here
     USE_EXTERNAL_DEPTH = True      # Use depth from script_7 for occlusion
     USE_EXTERNAL_COLOR = True      # Use color from script_7 for compositing
     COMPOSITE_OVER_REGULAR = True # Composite gaussians over regular scene
+    # SHADER INPUT
+    #SHADER_DIRECTORY = r"D:\Path\To\Addon\shaders"
     # Animation-specific settings
     START_FRAME = 0               # Animation start frame (0 = use scene frame_start)
     END_FRAME = 0                 # Animation end frame (0 = use scene frame_end)
@@ -3997,8 +6914,22 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
     import gpu.types
     import mathutils
     import datetime
-    import time
-    import platform
+    #import os
+    import tempfile
+    import importlib.util
+    TEMP_SUBFOLDER_NAME = "_3dgs_temp"
+    INTERMEDIATE_OUTPUT_PATHS = []
+    PROXY_BINDING_UTILS_MODULE = None
+    PROXY_BINDING_UTILS_LOAD_FAILED = False
+
+    def is_supported_absolute_dir(path):
+        """Return True when a path is absolute for the current OS, not just root-relative."""
+        if not path:
+            return False
+        if platform.system() == "Windows":
+            drive, _ = os.path.splitdrive(path)
+            return bool(drive) or path.startswith("\\\\")
+        return os.path.isabs(path)
 
     def debug_print(message, force=False):
         """Print debug message if debugging is enabled"""
@@ -4006,35 +6937,155 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
             timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
             print(f"[DEBUG {timestamp}] {message}")
 
-    def resolve_blender_path(blender_path):
-        """
-        Convert path to absolute.
-        Safety Feature: If Mac/Linux sees a Windows path (C:\...), 
-        it automatically switches to the system Temp folder to prevent errors.
-        """
-        import os
-        # 1. Fallback Logic for Mac/Linux Users
-        system_is_windows = platform.system() == 'Windows'
-        # Check if this looks like a Windows path (e.g. starts with C:)
-        path_is_windows_style = len(blender_path) > 1 and blender_path[1] == ':'
-        # If we are NOT on Windows, but the path is for Windows, use System Temp
+    def get_safe_render_dir(scene=None):
+        """Resolve the user's render directory in a way that stays portable across OSes."""
+        scene = scene or bpy.context.scene
+        scene_path = scene.render.filepath
+        system_temp = os.path.join(tempfile.gettempdir(), "gaussian_render")
+        if not scene_path:
+            return system_temp
+        system_is_windows = platform.system() == "Windows"
+        path_is_windows_style = len(scene_path) > 1 and scene_path[1] == ":"
+        path_is_unsaved_relative = not bpy.data.filepath and scene_path.startswith("//")
         if not system_is_windows and path_is_windows_style:
-            safe_temp = os.path.join(tempfile.gettempdir(), "gaussian_render")
-            # Print warning only once
-            if not hasattr(resolve_blender_path, "_warned"):
-                print(f"Mac/Linux detected with Windows path ('{blender_path}').")
-                print(f"Auto-switching to safe system path: {safe_temp}")
-                resolve_blender_path._warned = True
-            return safe_temp
-        # 2. Standard Path Resolution
-        path = os.path.normpath(blender_path)
+            if not hasattr(get_safe_render_dir, "_warned"):
+                print("Mac/Linux detected with a Windows render path. Using a safe temp folder instead.")
+                get_safe_render_dir._warned = True
+            return system_temp
+        if path_is_unsaved_relative:
+            return system_temp
         try:
-            resolved = bpy.path.abspath(path)
-            if os.path.isabs(resolved):
-                 return os.path.normpath(resolved)
+            abs_path = bpy.path.abspath(scene_path)
+            final_dir = os.path.dirname(abs_path)
+            if not is_supported_absolute_dir(final_dir):
+                return system_temp
+            return os.path.normpath(final_dir)
         except Exception:
-            pass
-        return os.path.abspath(path)
+            return system_temp
+
+    def get_temp_render_dir(scene=None):
+        return os.path.join(get_safe_render_dir(scene), TEMP_SUBFOLDER_NAME)
+
+    def resolve_input_path(path_value):
+        """Resolve required addon asset paths such as the packaged shader folder."""
+        resolved = bpy.path.abspath(os.path.normpath(path_value))
+        return os.path.normpath(resolved)
+
+    def normalize_rig_baked_update_mode(mode_value):
+        """Normalize rig baked update mode values from UI/script inputs."""
+        normalized = str(mode_value).strip().lower().replace("_", " ").replace("-", " ")
+        if normalized in {"", "none", "off", "disabled"}:
+            return "None"
+        if normalized in {"enabled baked", "enabled"}:
+            return "Enabled Baked"
+        if normalized in {"all baked", "all"}:
+            return "All Baked"
+        print(f"Rig baked render update mode '{mode_value}' is invalid. Using 'None'.")
+        return "None"
+
+    def load_proxy_binding_utils():
+        """Load rigging helper module from an explicit path so text editor/Serpens runs both work."""
+        runtime_globals = globals()
+        cached_module = runtime_globals.get("PROXY_BINDING_UTILS_MODULE")
+        load_failed = runtime_globals.get("PROXY_BINDING_UTILS_LOAD_FAILED", False)
+        if cached_module is not None:
+            return cached_module
+        if load_failed:
+            return None
+        try:
+            if not proxy_binding_utils_path:
+                raise RuntimeError("proxy_binding_utils_path is empty")
+            utils_path = resolve_input_path(proxy_binding_utils_path)
+            if not os.path.exists(utils_path):
+                raise RuntimeError(f"proxy_binding_utils.py not found: {utils_path}")
+            module_name = "proxy_binding_utils_render_runtime"
+            spec = importlib.util.spec_from_file_location(module_name, utils_path)
+            if spec is None or spec.loader is None:
+                raise RuntimeError(f"Could not load import spec for {utils_path}")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+            runtime_globals["PROXY_BINDING_UTILS_MODULE"] = module
+            runtime_globals["PROXY_BINDING_UTILS_LOAD_FAILED"] = False
+            return module
+        except Exception as exc:
+            runtime_globals["PROXY_BINDING_UTILS_MODULE"] = None
+            runtime_globals["PROXY_BINDING_UTILS_LOAD_FAILED"] = True
+            print(f"Rig baked render support disabled: {exc}")
+            return None
+
+    def get_candidate_rig_baked_objects(rig_mode, proxy_utils):
+        """Find source mesh 3DGS objects that should receive baked rig updates this render."""
+        if rig_mode == "None" or proxy_utils is None:
+            return []
+        binding_path_prop = getattr(proxy_utils, "PROXY_BINDING_PATH_PROP", "proxy_binding_package_path")
+        sequence_prop = getattr(proxy_utils, "PROXY_SEQUENCE_BINDING_PROP", "proxy_sequence_binding")
+        targets = []
+        for obj in bpy.data.objects:
+            if obj.type != 'MESH':
+                continue
+            if not check_mesh_has_gaussian_attributes(obj):
+                continue
+            if not obj.get(binding_path_prop):
+                continue
+            if not obj.get(sequence_prop, False):
+                continue
+            if rig_mode == "Enabled Baked" and not bool(obj.get(RIG_BAKED_ENABLED_PROP_NAME, False)):
+                continue
+            targets.append(obj)
+        return targets
+
+    def apply_baked_rig_updates_for_frame(frame_number):
+        """Apply baked rig frames to eligible source mesh 3DGS objects and collect source UUIDs to refresh."""
+        rig_mode = normalize_rig_baked_update_mode(RIG_BAKED_UPDATE_MODE)
+        result = {
+            "mode": rig_mode,
+            "source_uuid_filter": set(),
+            "processed_count": 0,
+            "applied_count": 0,
+            "kept_current_count": 0,
+            "warning_count": 0,
+        }
+        if rig_mode == "None":
+            return result
+        proxy_utils = load_proxy_binding_utils()
+        if proxy_utils is None:
+            return result
+        target_objects = get_candidate_rig_baked_objects(rig_mode, proxy_utils)
+        if not target_objects:
+            debug_print(f"Rig baked mode '{rig_mode}' found no eligible source mesh 3DGS objects.")
+            return result
+        proxy_binding_error = getattr(proxy_utils, "ProxyBindingError", RuntimeError)
+        for mesh_obj in target_objects:
+            source_uuid = mesh_obj.get("gaussian_source_uuid")
+            result["processed_count"] += 1
+            try:
+                proxy_utils.apply_baked_frame_to_mesh(mesh_obj, frame_number)
+                if source_uuid:
+                    result["source_uuid_filter"].add(source_uuid)
+                result["applied_count"] += 1
+            except proxy_binding_error as exc:
+                message = str(exc)
+                if "No baked state found for frame" in message:
+                    if source_uuid:
+                        result["source_uuid_filter"].add(source_uuid)
+                    result["kept_current_count"] += 1
+                    debug_print(
+                        f"Rig baked frame missing for '{mesh_obj.name}' on frame {frame_number}; keeping current source mesh state."
+                    )
+                    continue
+                result["warning_count"] += 1
+                print(f"Rig baked render warning for '{mesh_obj.name}': {message}")
+            except Exception as exc:
+                result["warning_count"] += 1
+                print(f"Rig baked render warning for '{mesh_obj.name}': {exc}")
+        if result["processed_count"] > 0:
+            debug_print(
+                f"Rig baked update mode '{rig_mode}': processed {result['processed_count']} object(s), "
+                f"applied {result['applied_count']}, kept current {result['kept_current_count']}, "
+                f"warnings {result['warning_count']}"
+            )
+        return result
 
     def auto_reconstruct_cache():
         """Auto-detect and rebuild cache from existing scene objects"""
@@ -4083,18 +7134,30 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
             return False
 
     def auto_reconstruct_shaders():
-        """Auto-reconstruct shaders if missing"""
+        """Auto-reconstruct shaders, reloading when a shader directory is explicitly requested."""
         try:
-            # Check if shaders exist
-            if (hasattr(bpy, 'gaussian_quad_shader') and 
+            requested_shader_dir = None
+            if "SHADER_DIRECTORY" in globals():
+                requested_shader_dir = resolve_input_path(SHADER_DIRECTORY)
+            shaders_ready = (
+                hasattr(bpy, 'gaussian_quad_shader') and
                 hasattr(bpy, 'gaussian_composite_shader') and
-                bpy.gaussian_quad_shader and bpy.gaussian_composite_shader):
-                return True
-            debug_print("Shaders missing, auto-reconstructing...")
+                bpy.gaussian_quad_shader and bpy.gaussian_composite_shader
+            )
+            loaded_shader_dir = getattr(bpy, "gaussian_shader_directory", None)
+            if shaders_ready:
+                if not requested_shader_dir:
+                    return True
+                if loaded_shader_dir and os.path.normpath(loaded_shader_dir) == os.path.normpath(requested_shader_dir):
+                    return True
+                debug_print(f"Reloading shaders from requested directory: {requested_shader_dir}")
+            else:
+                debug_print("Shaders missing, auto-reconstructing...")
+            if not requested_shader_dir:
+                debug_print("SHADER_DIRECTORY input is missing", force=True)
+                return False
             # Import and run shader creation (adapted from script_2)
-            import os
-            # You'll need to set these paths to your shader files
-            shader_dir = r"D:\3d\Blender\my work\KIRI\KIRI - Tools\KIRI - Blender 3DGS Render\SplatForge Adaption\shaders"
+            shader_dir = requested_shader_dir
             vertex_shader_path = os.path.join(shader_dir, "vert.glsl")
             fragment_shader_path = os.path.join(shader_dir, "frag.glsl")
             composite_vertex_path = os.path.join(shader_dir, "composite_vert.glsl")
@@ -4186,6 +7249,7 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
             bpy.gaussian_quad_batch = quad_batch
             bpy.gaussian_composite_shader = composite_shader  
             bpy.gaussian_composite_batch = composite_batch
+            bpy.gaussian_shader_directory = shader_dir
             debug_print("Shaders auto-reconstructed successfully")
             return True
         except Exception as e:
@@ -4314,6 +7378,8 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
             bpy.gaussian_metadata_texture = metadata_texture
             bpy.gaussian_count = total_gaussians
             bpy.gaussian_object_metadata = all_object_metadata
+            bpy.gaussian_global_needs_update = False
+            bpy.gaussian_needs_depth_sort = True
             if DEBUG_TIMING:
                 total_time = time.perf_counter() - start_time
                 debug_print(f"Total texture reconstruction took {total_time*1000:.2f}ms")
@@ -4374,56 +7440,82 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
             debug_print(f"Transform update failed: {e}")
             return False
 
-    def extract_attribute_data(mesh_data, attr_name):
-        """Extract data from mesh attribute by name - optimized version"""
+    def get_face_quad_vertex_groups(mesh_data):
+        """Return one 4-vertex group per quad face for face-based gaussian sources."""
+        num_polygons = len(mesh_data.polygons)
+        if num_polygons == 0:
+            return None
+        face_vertex_indices = np.empty((num_polygons, 4), dtype=np.int32)
+        for poly_index, poly in enumerate(mesh_data.polygons):
+            poly_vertices = tuple(poly.vertices)
+            if len(poly_vertices) != 4:
+                return None
+            face_vertex_indices[poly_index] = poly_vertices
+        return face_vertex_indices
+
+    def collapse_attribute_values(data_array, face_vertex_indices, expected_vertex_count, attr_name):
+        """Collapse per-vertex attribute data down to one value per disconnected quad."""
+        if face_vertex_indices is None:
+            return data_array.astype(np.float32)
+        if len(data_array) == expected_vertex_count:
+            return data_array[face_vertex_indices].mean(axis=1).astype(np.float32)
+        if len(data_array) == len(face_vertex_indices):
+            return data_array.astype(np.float32)
+        raise ValueError(
+            f"Attribute '{attr_name}' has {len(data_array)} values, expected {expected_vertex_count} vertices "
+            f"or {len(face_vertex_indices)} face islands"
+        )
+
+    def extract_attribute_data(mesh_data, attr_name, face_vertex_indices=None, expected_vertex_count=None):
+        """Extract data from mesh attribute by name, with optional face-quad collapse."""
         if attr_name not in [attr.name for attr in mesh_data.attributes]:
             return None
         attr = mesh_data.attributes[attr_name]
         # Use foreach_get for much faster extraction
         data_array = np.zeros(len(attr.data), dtype=np.float32)
         attr.data.foreach_get("value", data_array)
-        return data_array
+        if expected_vertex_count is None:
+            expected_vertex_count = len(mesh_data.vertices)
+        return collapse_attribute_values(data_array, face_vertex_indices, expected_vertex_count, attr_name)
 
-    def extract_gaussian_data_from_evaluated_mesh(mesh_obj):
-        """Extract and process gaussian data from EVALUATED mesh object attributes"""
+    def extract_gaussian_data_from_mesh_data(mesh_data, mesh_name):
+        """Extract gaussian data and collapse disconnected face quads to one virtual point each."""
         extract_start = time.perf_counter() if DEBUG_TIMING else 0
-        # Get evaluated mesh data
-        depsgraph = bpy.context.evaluated_depsgraph_get()
-        evaluated_object = mesh_obj.evaluated_get(depsgraph)
-        evaluated_mesh = evaluated_object.data
-        debug_print(f"Extracting from evaluated mesh {mesh_obj.name}: {len(evaluated_mesh.vertices)} vertices")
-        # Extract positions from evaluated vertices - optimized version
-        num_points = len(evaluated_mesh.vertices)
-        if num_points == 0:
-            raise ValueError("Evaluated mesh has no vertices")
-        # Use foreach_get for fast vertex coordinate extraction
-        positions = np.zeros(num_points * 3, dtype=np.float32)
-        evaluated_mesh.vertices.foreach_get("co", positions)
+        num_vertices = len(mesh_data.vertices)
+        if num_vertices == 0:
+            raise ValueError("Mesh has no vertices")
+        face_vertex_indices = get_face_quad_vertex_groups(mesh_data)
+        if face_vertex_indices is not None:
+            debug_print(
+                f"Detected face-based gaussian mesh {mesh_name}: collapsing "
+                f"{num_vertices:,} quad vertices to {len(face_vertex_indices):,} splats",
+                force=True,
+            )
+        positions = np.zeros(num_vertices * 3, dtype=np.float32)
+        mesh_data.vertices.foreach_get("co", positions)
         positions = positions.reshape(-1, 3)
+        if face_vertex_indices is not None:
+            positions = positions[face_vertex_indices].mean(axis=1).astype(np.float32)
+        num_points = len(positions)
         if DEBUG_DATA_CHANGES:
-            # Log sample positions for debugging
-            debug_print(f"Sample positions from {mesh_obj.name}: {positions[:3]}")
-        # Get available attributes from evaluated mesh
-        available_attrs = [attr.name for attr in evaluated_mesh.attributes]
-        # Extract spherical harmonics from evaluated mesh
+            debug_print(f"Sample positions from {mesh_name}: {positions[:3]}")
+        available_attrs = [attr.name for attr in mesh_data.attributes]
         if all(attr in available_attrs for attr in ['f_dc_0', 'f_dc_1', 'f_dc_2']):
-            dc_0 = extract_attribute_data(evaluated_mesh, 'f_dc_0')
-            dc_1 = extract_attribute_data(evaluated_mesh, 'f_dc_1')
-            dc_2 = extract_attribute_data(evaluated_mesh, 'f_dc_2')
-            features_dc = np.column_stack([dc_0, dc_1, dc_2])
-            # Find f_rest fields
+            dc_0 = extract_attribute_data(mesh_data, 'f_dc_0', face_vertex_indices, num_vertices)
+            dc_1 = extract_attribute_data(mesh_data, 'f_dc_1', face_vertex_indices, num_vertices)
+            dc_2 = extract_attribute_data(mesh_data, 'f_dc_2', face_vertex_indices, num_vertices)
+            features_dc = np.column_stack([dc_0, dc_1, dc_2]).astype(np.float32)
             f_rest_fields = [attr for attr in available_attrs if attr.startswith('f_rest_')]
             f_rest_fields = sorted(f_rest_fields, key=lambda x: int(x.split('_')[-1]))
             if f_rest_fields:
                 features_extra_list = []
                 for field in f_rest_fields:
-                    data = extract_attribute_data(evaluated_mesh, field)
+                    data = extract_attribute_data(mesh_data, field, face_vertex_indices, num_vertices)
                     if data is not None:
                         features_extra_list.append(data)
                 if features_extra_list:
-                    features_extra = np.column_stack(features_extra_list)
+                    features_extra = np.column_stack(features_extra_list).astype(np.float32)
                     num_f_rest = len(f_rest_fields)
-                    # Determine degree and coefficients to use
                     if num_f_rest >= 45:
                         actual_degree = 3
                         coeffs_to_use = 45
@@ -4443,7 +7535,7 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
                         features_extra_reshaped = np.transpose(features_extra_reshaped, [0, 2, 1])
                         features_dc_reshaped = features_dc.reshape(-1, 1, 3)
                         all_features = np.concatenate([features_dc_reshaped, features_extra_reshaped], axis=1)
-                        sh_coeffs = all_features.reshape(num_points, -1)
+                        sh_coeffs = all_features.reshape(num_points, -1).astype(np.float32)
                     else:
                         sh_coeffs = features_dc
                 else:
@@ -4451,51 +7543,92 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
             else:
                 sh_coeffs = features_dc
         else:
-            # Default SH coeffs if not found
             debug_print(f"Warning: f_dc attributes not found on evaluated mesh, using defaults")
-            sh_coeffs = np.ones((num_points, 3)) * 0.28209479177387814
-        # Extract scales from evaluated mesh
+            sh_coeffs = np.ones((num_points, 3), dtype=np.float32) * 0.28209479177387814
         if all(attr in available_attrs for attr in ['scale_0', 'scale_1', 'scale_2']):
-            scale_0 = extract_attribute_data(evaluated_mesh, 'scale_0')
-            scale_1 = extract_attribute_data(evaluated_mesh, 'scale_1')
-            scale_2 = extract_attribute_data(evaluated_mesh, 'scale_2')
-            scales = np.column_stack([scale_0, scale_1, scale_2])
-            scales = np.exp(scales)  # Apply exponential
+            scale_0 = extract_attribute_data(mesh_data, 'scale_0', face_vertex_indices, num_vertices)
+            scale_1 = extract_attribute_data(mesh_data, 'scale_1', face_vertex_indices, num_vertices)
+            scale_2 = extract_attribute_data(mesh_data, 'scale_2', face_vertex_indices, num_vertices)
+            scales = np.column_stack([scale_0, scale_1, scale_2]).astype(np.float32)
+            scales = np.exp(scales)
         else:
             debug_print(f"Warning: scale attributes not found on evaluated mesh, using defaults")
-            scales = np.ones((num_points, 3)) * 0.01
-        # Extract rotations from evaluated mesh
+            scales = np.ones((num_points, 3), dtype=np.float32) * 0.01
         if all(attr in available_attrs for attr in ['rot_0', 'rot_1', 'rot_2', 'rot_3']):
-            rot_0 = extract_attribute_data(evaluated_mesh, 'rot_0')
-            rot_1 = extract_attribute_data(evaluated_mesh, 'rot_1')
-            rot_2 = extract_attribute_data(evaluated_mesh, 'rot_2')
-            rot_3 = extract_attribute_data(evaluated_mesh, 'rot_3')
-            rotations = np.column_stack([rot_0, rot_1, rot_2, rot_3])
-            # Normalize quaternions
+            rot_0 = extract_attribute_data(mesh_data, 'rot_0', face_vertex_indices, num_vertices)
+            rot_1 = extract_attribute_data(mesh_data, 'rot_1', face_vertex_indices, num_vertices)
+            rot_2 = extract_attribute_data(mesh_data, 'rot_2', face_vertex_indices, num_vertices)
+            rot_3 = extract_attribute_data(mesh_data, 'rot_3', face_vertex_indices, num_vertices)
+            rotations = np.column_stack([rot_0, rot_1, rot_2, rot_3]).astype(np.float32)
             norms = np.linalg.norm(rotations, axis=1, keepdims=True)
+            norms[norms == 0.0] = 1.0
             rotations = rotations / norms
         else:
             debug_print(f"Warning: rotation attributes not found on evaluated mesh, using defaults")
-            rotations = np.zeros((num_points, 4))
-            rotations[:, 0] = 1.0  # Identity quaternion
-        # Extract opacity from evaluated mesh
+            rotations = np.zeros((num_points, 4), dtype=np.float32)
+            rotations[:, 0] = 1.0
         if 'opacity' in available_attrs:
-            opacity_raw = extract_attribute_data(evaluated_mesh, 'opacity')
-            opacity = 1.0 / (1.0 + np.exp(-opacity_raw))  # Apply sigmoid
+            opacity_raw = extract_attribute_data(mesh_data, 'opacity', face_vertex_indices, num_vertices)
+            opacity = 1.0 / (1.0 + np.exp(-opacity_raw))
         else:
             debug_print(f"Warning: opacity attribute not found on evaluated mesh, using defaults")
-            opacity = np.ones(num_points)
+            opacity = np.ones(num_points, dtype=np.float32)
         if DEBUG_TIMING:
             debug_print(f"Data extraction took {(time.perf_counter() - extract_start)*1000:.2f}ms")
         return {
             'num_points': num_points,
-            'positions': positions,
-            'scales': scales,
-            'rotations': rotations,
-            'opacities': opacity,
-            'sh_coeffs': sh_coeffs,
-            'sh_dim': sh_coeffs.shape[1]
+            'positions': positions.astype(np.float32),
+            'scales': scales.astype(np.float32),
+            'rotations': rotations.astype(np.float32),
+            'opacities': opacity.astype(np.float32),
+            'sh_coeffs': sh_coeffs.astype(np.float32),
+            'sh_dim': sh_coeffs.shape[1],
+            'used_face_quad_collapse': face_vertex_indices is not None,
         }
+
+    def extract_gaussian_data_from_evaluated_mesh(mesh_obj):
+        """Extract and process gaussian data from EVALUATED mesh object attributes"""
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        original_hide_viewport = bool(getattr(mesh_obj, "hide_viewport", False))
+        original_hide_get = False
+        visibility_changed = False
+        try:
+            try:
+                original_hide_get = bool(mesh_obj.hide_get())
+            except Exception:
+                original_hide_get = False
+            if original_hide_viewport:
+                mesh_obj.hide_viewport = False
+                visibility_changed = True
+            if original_hide_get:
+                try:
+                    mesh_obj.hide_set(False)
+                    visibility_changed = True
+                except Exception:
+                    pass
+            if visibility_changed:
+                bpy.context.view_layer.update()
+            evaluated_object = mesh_obj.evaluated_get(depsgraph)
+            evaluated_mesh = evaluated_object.data
+            debug_print(f"Extracting from evaluated mesh {mesh_obj.name}: {len(evaluated_mesh.vertices)} vertices")
+            return extract_gaussian_data_from_mesh_data(evaluated_mesh, mesh_obj.name)
+        finally:
+            if visibility_changed:
+                try:
+                    if bool(getattr(mesh_obj, "hide_viewport", False)) != original_hide_viewport:
+                        mesh_obj.hide_viewport = original_hide_viewport
+                except Exception:
+                    pass
+                try:
+                    current_hide_get = bool(mesh_obj.hide_get())
+                    if current_hide_get != original_hide_get:
+                        mesh_obj.hide_set(original_hide_get)
+                except Exception:
+                    pass
+                try:
+                    bpy.context.view_layer.update()
+                except Exception:
+                    pass
 
     def check_mesh_has_gaussian_attributes(mesh_obj):
         """Check if mesh object has basic gaussian attributes"""
@@ -4506,14 +7639,24 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
         available_attrs = [attr.name for attr in mesh_obj.data.attributes]
         return all(attr in available_attrs for attr in required_attrs)
 
-    def refresh_data_from_evaluated_sources():
+    def refresh_data_from_evaluated_sources(source_uuid_filter=None):
         """Re-extract gaussian data from evaluated source meshes (EXPENSIVE!) - WITH DEBUG"""
         try:
             start_time = time.perf_counter() if DEBUG_TIMING else 0
             if not hasattr(bpy, 'gaussian_object_cache') or not bpy.gaussian_object_cache:
                 debug_print("ERROR: No gaussian object cache found")
                 return False
-            debug_print(f"Starting evaluated data refresh for {len(bpy.gaussian_object_cache)} objects...")
+            if source_uuid_filter is not None:
+                source_uuid_filter = set(source_uuid_filter)
+                if not source_uuid_filter:
+                    debug_print("Rig-targeted source refresh skipped because no source UUIDs were provided.")
+                    return False
+            refresh_scope = (
+                f"{len(source_uuid_filter)} rig-targeted source object(s)"
+                if source_uuid_filter is not None
+                else f"{len(bpy.gaussian_object_cache)} objects"
+            )
+            debug_print(f"Starting evaluated data refresh for {refresh_scope}...")
             updated_count = 0
             data_changes_detected = []
             for obj_name, obj_data in bpy.gaussian_object_cache.items():
@@ -4523,6 +7666,8 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
                 if not source_uuid:
                     debug_print(f"Skipping {obj_name}: No source UUID (PLY source)")
                     continue  # PLY source or no source info
+                if source_uuid_filter is not None and source_uuid not in source_uuid_filter:
+                    continue
                 # Find source object
                 source_obj = find_source_object_by_uuid(source_uuid)
                 if not source_obj:
@@ -4600,6 +7745,17 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
             import traceback
             debug_print(f"Traceback: {traceback.format_exc()}")
             return False
+
+    def rebuild_textures_after_source_refresh():
+        """Rebuild global gaussian textures after source-backed gaussian data changes."""
+        texture_rebuild_start = time.perf_counter()
+        rebuild_success = auto_reconstruct_textures()
+        texture_rebuild_time = time.perf_counter() - texture_rebuild_start
+        if not rebuild_success:
+            debug_print("ERROR: Failed to rebuild textures after data refresh", force=True)
+            return False
+        debug_print(f"Texture rebuild completed in {texture_rebuild_time*1000:.2f}ms")
+        return True
     # ========== SIMPLIFIED COMPOSITING FUNCTIONS (Let Blender handle paths) ==========
 
     def load_external_depth_from_script7a(frame_num, width, height):
@@ -4607,8 +7763,8 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
         try:
             if not USE_EXTERNAL_DEPTH:
                 return None
-            # Resolve path safely (handles Mac/Linux fix)
-            render_dir = resolve_blender_path(TEMP_RENDER_PATH)
+            # Use the shared temp render folder derived from the Scene Output settings
+            render_dir = get_temp_render_dir(bpy.context.scene)
             depth_path = os.path.join(render_dir, f"regular_depth_{frame_num:04d}.exr")
             debug_print(f"Attempting to load external depth: {depth_path}")
             # Try to load directly
@@ -4683,8 +7839,8 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
         try:
             if not USE_EXTERNAL_COLOR:
                 return None, None
-            # Resolve path safely (handles Mac/Linux fix)
-            render_dir = resolve_blender_path(TEMP_RENDER_PATH)
+            # Use the shared temp render folder derived from the Scene Output settings
+            render_dir = get_temp_render_dir(bpy.context.scene)
             color_path = os.path.join(render_dir, f"regular_color_{frame_num:04d}.exr")
             debug_print(f"Attempting to load external color: {color_path}")
             # Try to load directly
@@ -4732,6 +7888,139 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
         except Exception as e:
             debug_print(f"Alpha compositing failed: {e}")
             return None
+
+    def make_unique_scene_name(base_name):
+        """Create a unique scene name for a temporary helper scene."""
+        if base_name not in bpy.data.scenes:
+            return base_name
+        counter = 1
+        while f"{base_name}_{counter:03d}" in bpy.data.scenes:
+            counter += 1
+        return f"{base_name}_{counter:03d}"
+
+    def make_unique_tree_name(base_name):
+        """Create a unique compositor node-tree name for temporary helper scenes."""
+        if base_name not in bpy.data.node_groups:
+            return base_name
+        counter = 1
+        while f"{base_name}_{counter:03d}" in bpy.data.node_groups:
+            counter += 1
+        return f"{base_name}_{counter:03d}"
+
+    def get_scene_compositor_tree(scene, create_if_missing=False, base_name="Compositor"):
+        """Get the scene compositor tree in a way that works across Blender versions."""
+        try:
+            scene.use_nodes = True
+        except Exception:
+            pass
+        if hasattr(scene, "compositing_node_group"):
+            if create_if_missing and not scene.compositing_node_group:
+                scene.compositing_node_group = bpy.data.node_groups.new(
+                    name=make_unique_tree_name(base_name),
+                    type="CompositorNodeTree",
+                )
+            return scene.compositing_node_group
+        if hasattr(scene, "node_tree"):
+            return scene.node_tree
+        return None
+
+    def localize_temp_scene_compositor(source_scene, temp_scene):
+        """Make sure temp compositor edits never point back at the user's live compositor tree."""
+        if hasattr(temp_scene, "compositing_node_group") and temp_scene.compositing_node_group:
+            if (
+                hasattr(source_scene, "compositing_node_group")
+                and source_scene.compositing_node_group
+                and temp_scene.compositing_node_group == source_scene.compositing_node_group
+            ):
+                temp_scene.compositing_node_group = temp_scene.compositing_node_group.copy()
+            return
+        if hasattr(temp_scene, "node_tree") and temp_scene.node_tree:
+            try:
+                if hasattr(source_scene, "node_tree") and source_scene.node_tree and temp_scene.node_tree == source_scene.node_tree:
+                    temp_scene.node_tree = temp_scene.node_tree.copy()
+            except Exception:
+                pass
+
+    def copy_scene_compositor_to_temp_scene(source_scene, temp_scene, base_name):
+        """Give the temp scene its own compositor tree, copied from the user scene when available."""
+        source_tree = get_scene_compositor_tree(source_scene, create_if_missing=False)
+        if hasattr(temp_scene, "compositing_node_group"):
+            if source_tree:
+                temp_scene.compositing_node_group = source_tree.copy()
+            else:
+                temp_scene.compositing_node_group = bpy.data.node_groups.new(
+                    name=make_unique_tree_name(base_name),
+                    type="CompositorNodeTree",
+                )
+            return temp_scene.compositing_node_group
+        localize_temp_scene_compositor(source_scene, temp_scene)
+        return get_scene_compositor_tree(temp_scene, create_if_missing=True, base_name=base_name)
+
+    def create_linked_temp_scene(source_scene, base_name):
+        """Create a linked helper scene, then localize the compositor tree before editing it."""
+        window = bpy.context.window
+        if not window:
+            raise RuntimeError("No Blender window context available to create a temporary helper scene")
+        previous_scene = window.scene
+        window.scene = source_scene
+        bpy.ops.scene.new(type='LINK_COPY')
+        temp_scene = window.scene
+        temp_scene.name = make_unique_scene_name(base_name)
+        localize_temp_scene_compositor(source_scene, temp_scene)
+        window.scene = previous_scene
+        return temp_scene
+
+    def remove_temp_scene(temp_scene, fallback_scene):
+        """Delete the helper scene once its work is complete."""
+        window = bpy.context.window
+        if window and window.scene == temp_scene:
+            window.scene = fallback_scene
+        if temp_scene and temp_scene.name in bpy.data.scenes:
+            bpy.data.scenes.remove(temp_scene)
+
+    def cleanup_temp_render_files(scene=None):
+        """Delete temp regular-scene EXRs after a fully successful render, if requested."""
+        temp_dir = get_temp_render_dir(scene)
+        if not os.path.exists(temp_dir):
+            return 0
+        try:
+            deleted_count = 0
+            for root, dirnames, file_names in os.walk(temp_dir, topdown=False):
+                for file_name in file_names:
+                    os.remove(os.path.join(root, file_name))
+                    deleted_count += 1
+                for dir_name in dirnames:
+                    dir_path = os.path.join(root, dir_name)
+                    if not os.listdir(dir_path):
+                        os.rmdir(dir_path)
+            if not os.listdir(temp_dir):
+                os.rmdir(temp_dir)
+            return deleted_count
+        except Exception as e:
+            debug_print(f"Temp cleanup warning: {e}", force=True)
+            return 0
+
+    def cleanup_intermediate_output_files():
+        """Delete only the exact intermediate outputs created by this run."""
+        global INTERMEDIATE_OUTPUT_PATHS
+        deleted_count = 0
+        parent_dirs = set()
+        for output_path in list(INTERMEDIATE_OUTPUT_PATHS):
+            try:
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+                    deleted_count += 1
+                    parent_dirs.add(os.path.dirname(output_path))
+            except Exception as e:
+                debug_print(f"Intermediate cleanup warning for {output_path}: {e}", force=True)
+        for parent_dir in parent_dirs:
+            try:
+                if parent_dir and os.path.isdir(parent_dir) and not os.listdir(parent_dir):
+                    os.rmdir(parent_dir)
+            except Exception:
+                pass
+        INTERMEDIATE_OUTPUT_PATHS = []
+        return deleted_count
     # ========== CORE RENDERING FUNCTIONS ==========
 
     def update_metadata_texture():
@@ -4888,8 +8177,8 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
                 debug_print("Composite shader not available")
                 return None
             # Create temporary framebuffer for composite
-            composite_color = gpu.types.GPUTexture((width, height), format='RGBA8')
-            composite_depth = gpu.types.GPUTexture((width, height), format='DEPTH_COMPONENT24')
+            composite_color = gpu.types.GPUTexture((width, height), format='RGBA32F')
+            composite_depth = gpu.types.GPUTexture((width, height), format='DEPTH_COMPONENT32F')
             composite_fb = gpu.types.GPUFrameBuffer(
                 color_slots=[composite_color],
                 depth_slot=composite_depth
@@ -4997,7 +8286,7 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
                             aspect_ratio = width / height
                             tan_half_fovx = tan_half_fovy * aspect_ratio
                             focal = height / (2.0 * tan_half_fovy)
-                            camera_pos = mathutils.Vector((view_matrix[0][3], view_matrix[1][3], view_matrix[2][3]))
+                            camera_pos = camera.matrix_world.translation.copy()
                             bpy.gaussian_quad_shader.uniform_float("focal_parameters", (tan_half_fovx, tan_half_fovy, focal))
                             bpy.gaussian_quad_shader.uniform_float("camera_position", camera_pos)
                             bpy.gaussian_quad_shader.uniform_int("render_mode", render_mode)
@@ -5063,10 +8352,21 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
             original_frame = scene.frame_current
             if frame_num is not None:
                 scene.frame_set(frame_num)
-            base_path = scene.render.frame_path(frame=frame_num if frame_num else scene.frame_current)
+            current_output_frame = frame_num if frame_num is not None else scene.frame_current
+            base_path = scene.render.frame_path(frame=current_output_frame)
             # Add pass suffix to filename
-            path_parts = os.path.splitext(base_path)
-            output_path = f"{path_parts[0]}_{pass_suffix}{path_parts[1]}"
+            base_root, extension = os.path.splitext(base_path)
+            base_dir = os.path.dirname(base_root)
+            base_name = os.path.basename(base_root) or f"{current_output_frame:04d}"
+            if not is_supported_absolute_dir(base_dir):
+                base_root = os.path.join(get_safe_render_dir(scene), base_name)
+            output_file_name = f"{base_name}_{pass_suffix}{extension}"
+            if USE_TEMP_RENDERS and pass_suffix == 'color':
+                temp_dir = get_temp_render_dir(scene)
+                os.makedirs(temp_dir, exist_ok=True)
+                output_path = os.path.join(temp_dir, output_file_name)
+            else:
+                output_path = f"{base_root}_{pass_suffix}{extension}"
             scene.frame_set(original_frame)
             return output_path
         except Exception as e:
@@ -5100,18 +8400,35 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
             debug_print(f"=== STARTING FRAME RENDER ===", force=True)
             debug_print(f"Frame: {frame_num}, Animation: {is_animation}")
             debug_print(f"Compositing: USE_TEMP_RENDERS={USE_TEMP_RENDERS}, Depth={USE_EXTERNAL_DEPTH}, Color={USE_EXTERNAL_COLOR}")
-            # Set frame if specified and handle source object updates
-            if frame_num is not None:
-                debug_print(f"Setting frame to {frame_num}")
-                scene.frame_set(frame_num)
+            rig_mode = normalize_rig_baked_update_mode(RIG_BAKED_UPDATE_MODE)
+            should_prepare_source_state = (
+                frame_num is not None or
+                rig_mode != "None" or
+                UPDATE_SOURCE_TRANSFORMS or
+                REFRESH_EVALUATED_DATA
+            )
+            if should_prepare_source_state:
+                if frame_num is not None:
+                    debug_print(f"Setting frame to {frame_num}")
+                else:
+                    debug_print(f"Preparing current frame state for frame {current_frame}")
+                scene.frame_set(current_frame)
                 depsgraph_start = time.perf_counter() if DEBUG_TIMING else 0
                 bpy.context.evaluated_depsgraph_get().update()
                 if DEBUG_TIMING:
                     debug_print(f"Depsgraph update took {(time.perf_counter() - depsgraph_start)*1000:.2f}ms")
-                # NEW: Optional source object updates WITH DEBUG
+                rig_update_result = apply_baked_rig_updates_for_frame(current_frame)
+                rig_source_uuid_filter = rig_update_result["source_uuid_filter"]
+                if rig_update_result["processed_count"] > 0:
+                    bpy.context.evaluated_depsgraph_get().update()
+                # Optional source object updates WITH DEBUG
                 if UPDATE_SOURCE_TRANSFORMS:
                     debug_print("Updating transforms from source objects...")
                     update_transforms_from_sources()
+                data_updated = False
+                if rig_source_uuid_filter and not REFRESH_EVALUATED_DATA:
+                    debug_print("=== REFRESHING RIG BAKED SOURCE DATA ===")
+                    data_updated = refresh_data_from_evaluated_sources(rig_source_uuid_filter) or data_updated
                 if REFRESH_EVALUATED_DATA:
                     debug_print("=== REFRESHING EVALUATED DATA ===")
                     # Store cache state before refresh for comparison
@@ -5122,31 +8439,25 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
                                 'count': obj_data['gaussian_count'],
                                 'data_hash': hash(obj_data['gaussian_data'].tobytes())
                             }
-                    data_updated = refresh_data_from_evaluated_sources()
-                    if data_updated:
-                        debug_print("Data was updated, rebuilding textures...")
-                        # Verify cache changes
-                        if DEBUG_DATA_CHANGES:
-                            debug_print("CACHE STATE COMPARISON:")
-                            for obj_name, obj_data in bpy.gaussian_object_cache.items():
-                                if obj_name in cache_before:
-                                    old_hash = cache_before[obj_name]['data_hash']
-                                    new_hash = hash(obj_data['gaussian_data'].tobytes())
-                                    if old_hash != new_hash:
-                                        debug_print(f"  {obj_name}: DATA CHANGED (hash: {old_hash} -> {new_hash})")
-                                    else:
-                                        debug_print(f"  {obj_name}: no data change detected")
-                        # Rebuild textures
-                        texture_rebuild_start = time.perf_counter()
-                        rebuild_success = auto_reconstruct_textures()
-                        texture_rebuild_time = time.perf_counter() - texture_rebuild_start
-                        if not rebuild_success:
-                            debug_print(f"ERROR: Failed to rebuild textures after data refresh", force=True)
-                            return False
-                        else:
-                            debug_print(f"Texture rebuild completed in {texture_rebuild_time*1000:.2f}ms")
-                    else:
-                        debug_print("No data updates detected, skipping texture rebuild")
+                    refreshed_all_sources = refresh_data_from_evaluated_sources()
+                    data_updated = refreshed_all_sources or data_updated
+                    if DEBUG_DATA_CHANGES and refreshed_all_sources:
+                        debug_print("CACHE STATE COMPARISON:")
+                        for obj_name, obj_data in bpy.gaussian_object_cache.items():
+                            if obj_name in cache_before:
+                                old_hash = cache_before[obj_name]['data_hash']
+                                new_hash = hash(obj_data['gaussian_data'].tobytes())
+                                if old_hash != new_hash:
+                                    debug_print(f"  {obj_name}: DATA CHANGED (hash: {old_hash} -> {new_hash})")
+                                else:
+                                    debug_print(f"  {obj_name}: no data change detected")
+                if data_updated:
+                    debug_print("Data was updated, rebuilding textures...")
+                    rebuild_success = rebuild_textures_after_source_refresh()
+                    if not rebuild_success:
+                        return False
+                elif rig_source_uuid_filter or REFRESH_EVALUATED_DATA:
+                    debug_print("No data updates detected, skipping texture rebuild")
             # Determine render resolution
             if RENDER_WIDTH > 0 and RENDER_HEIGHT > 0:
                 width = RENDER_WIDTH
@@ -5211,6 +8522,7 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
                     debug_print("Completed compositing over regular scene")
                     if DEBUG_TIMING:
                         debug_print(f"Color compositing took {(time.perf_counter() - composite_start)*1000:.2f}ms")
+            saved_output_paths = {}
             # Save results to files and create image datablocks
             if SAVE_TO_FILE or not is_animation:
                 debug_print("Saving render results...")
@@ -5237,6 +8549,9 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
                             else:
                                 image.filepath_raw = output_path
                                 image.save()
+                            saved_output_paths[pass_suffix] = output_path
+                            if USE_TEMP_RENDERS and pass_suffix == 'color':
+                                INTERMEDIATE_OUTPUT_PATHS.append(output_path)
                             if not is_animation:
                                 debug_print(f"Saved {pass_suffix}: {os.path.basename(output_path)}")
             # Cleanup
@@ -5265,6 +8580,7 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
             def rm_ms(d):
                 return d - datetime.timedelta(microseconds=d.microseconds)
             animation_start_time = time.time()
+            render_animation.had_failures = False
             scene = bpy.context.scene
             user_frame = scene.frame_current
             # Get enabled passes
@@ -5323,8 +8639,12 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
             debug_print(f"Frames successful: {successful_frames}", force=True)
             debug_print(f"Frames failed: {failed_frames}", force=True)
             debug_print(f"Passes enabled: {', '.join(pass_names)}", force=True)
+            render_animation.had_failures = failed_frames > 0
+            render_animation.successful_frames = successful_frames
+            render_animation.failed_frames = failed_frames
             return successful_frames > 0
         except Exception as e:
+            render_animation.had_failures = True
             debug_print(f"Animation render failed: {e}", force=True)
             import traceback
             debug_print(f"Traceback: {traceback.format_exc()}")
@@ -5333,6 +8653,9 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
     def main_render():
         """Main render function that handles both single frame and animation with multi-pass support and compositing"""
         try:
+            global INTERMEDIATE_OUTPUT_PATHS
+            scene = bpy.context.scene
+            INTERMEDIATE_OUTPUT_PATHS = []
             # Check that at least one pass is enabled
             enabled_passes = get_enabled_passes()
             if not enabled_passes:
@@ -5353,14 +8676,29 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
                 return False
             debug_print("Dependencies ready!", force=True)
             debug_print(f"Source updates: Transforms={UPDATE_SOURCE_TRANSFORMS}, Data={REFRESH_EVALUATED_DATA}", force=True)
+            debug_print(
+                f"Rig baked updates: Mode={normalize_rig_baked_update_mode(RIG_BAKED_UPDATE_MODE)}, "
+                f"EnabledProp={RIG_BAKED_ENABLED_PROP_NAME}",
+                force=True,
+            )
             debug_print(f"Compositing enabled: {USE_TEMP_RENDERS} (Depth={USE_EXTERNAL_DEPTH}, Color={USE_EXTERNAL_COLOR})", force=True)
             # Route to appropriate render function
             if RENDER_ANIMATION:
                 debug_print("Starting ANIMATION render...", force=True)
-                return render_animation()
+                render_success = render_animation()
+                cleanup_allowed = render_success and not getattr(render_animation, "had_failures", False)
             else:
                 debug_print("Starting SINGLE FRAME render...", force=True)
-                return render_frame_with_integration()
+                render_success = render_frame_with_integration()
+                cleanup_allowed = render_success
+            if render_success and cleanup_allowed and DELETE_TEMP_FILES_AFTER_SUCCESS and USE_TEMP_RENDERS:
+                deleted_intermediate = cleanup_intermediate_output_files()
+                deleted_temp = cleanup_temp_render_files(scene)
+                debug_print(
+                    f"Temp cleanup removed {deleted_intermediate + deleted_temp} file(s)",
+                    force=True,
+                )
+            return render_success
         except Exception as e:
             debug_print(f"Main render function failed: {e}", force=True)
             import traceback
@@ -5371,6 +8709,11 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
     mode += " WITH EXTERNAL INTEGRATION" if USE_TEMP_RENDERS else ""
     debug_print(f"Starting {mode} render...", force=True)
     debug_print(f"Source object updates enabled: Transforms={UPDATE_SOURCE_TRANSFORMS}, Data={REFRESH_EVALUATED_DATA}", force=True)
+    debug_print(
+        f"Rig baked update settings: Mode={normalize_rig_baked_update_mode(RIG_BAKED_UPDATE_MODE)}, "
+        f"EnabledProp={RIG_BAKED_ENABLED_PROP_NAME}",
+        force=True,
+    )
     debug_print(f"Compositing settings: Use={USE_TEMP_RENDERS}, Depth={USE_EXTERNAL_DEPTH}, Color={USE_EXTERNAL_COLOR}", force=True)
     debug_print(f"Debug settings: Verbose={DEBUG_VERBOSE}, DataChanges={DEBUG_DATA_CHANGES}, Timing={DEBUG_TIMING}", force=True)
     render_success = main_render()
@@ -5380,12 +8723,14 @@ def sna_render_comp_0DAEE(RENDER_ANIMATION, RENDER_COLOR, RENDER_DEPTH, COMP_WIT
         debug_print(f"{mode} render failed!", force=True)
 
 
-def sna_viewport_render_A3941():
+def sna_viewport_render_A3941(SH_DEGREE, SORT_THRESHOLD):
+    SH_DEGREE = SH_DEGREE
+    SORT_THRESHOLD = SORT_THRESHOLD
     # ========== VARIABLES (EDIT THESE) ==========
     ENABLE_RENDERING = True
     RENDER_MODE = 0  # 0=Gaussian, 1=Depth, 2=Surfel
-    SH_DEGREE = 3    # 0, 1, 2, or 3
-    SORT_THRESHOLD = 0.05  # Camera movement threshold for re-sorting
+    #SH_DEGREE = 3    # 0, 1, 2, or 3
+    #SORT_THRESHOLD = 0.05  # Camera movement threshold for re-sorting
     # ============================================
     #import bpy
     #import gpu
@@ -5443,7 +8788,7 @@ def sna_viewport_render_A3941():
         try:
             if width <= 0 or height <= 0:
                 return None
-            color_texture = gpu.types.GPUTexture((width, height), format='RGBA8')
+            color_texture = gpu.types.GPUTexture((width, height), format='RGBA32F')
             depth_texture = gpu.types.GPUTexture((width, height), format='DEPTH_COMPONENT24')
             framebuffer = gpu.types.GPUFrameBuffer(
                 color_slots=[color_texture],
@@ -5576,14 +8921,19 @@ def sna_viewport_render_A3941():
             if not hasattr(bpy, 'gaussian_object_metadata'):
                 return False
             view_matrix = gpu.matrix.get_model_view_matrix()
+            camera_world_matrix = view_matrix.inverted_safe()
+            current_camera_pos = [
+                camera_world_matrix.translation.x,
+                camera_world_matrix.translation.y,
+                camera_world_matrix.translation.z,
+            ]
             # NEW: Check if forced depth sort is requested by script_3
             force_sort = getattr(bpy, 'gaussian_needs_depth_sort', False)
             # Check if camera moved enough to require re-sorting
             update_needed = force_sort  # Start with force flag
             if not force_sort and hasattr(bpy, 'gaussian_last_camera_pos'):
                 last_pos = bpy.gaussian_last_camera_pos
-                current_pos = [view_matrix[0][3], view_matrix[1][3], view_matrix[2][3]]
-                movement = sum((a-b)**2 for a,b in zip(last_pos, current_pos))**0.5
+                movement = sum((a-b)**2 for a,b in zip(last_pos, current_camera_pos))**0.5
                 update_needed = movement > SORT_THRESHOLD
             elif not force_sort:
                 update_needed = True  # First time, no stored camera position
@@ -5644,7 +8994,7 @@ def sna_viewport_render_A3941():
                         format='R32F',
                         data=indices_buffer
                     )
-                bpy.gaussian_last_camera_pos = [view_matrix[0][3], view_matrix[1][3], view_matrix[2][3]]
+                bpy.gaussian_last_camera_pos = current_camera_pos
                 return True
             return False
         except Exception as e:
@@ -5725,7 +9075,7 @@ def sna_viewport_render_A3941():
                 aspect_ratio = viewport_width / viewport_height
                 tan_half_fovx = tan_half_fovy * aspect_ratio
                 focal = viewport_height / (2.0 * tan_half_fovy)
-                camera_pos = mathutils.Vector((view_matrix[0][3], view_matrix[1][3], view_matrix[2][3]))
+                camera_pos = view_matrix.inverted_safe().translation.copy()
                 gpu.state.depth_test_set('NONE')
                 gpu.state.depth_mask_set(False) 
                 gpu.state.blend_set('ALPHA')
@@ -5792,51 +9142,78 @@ def sna_texture_creation_FD1B2():
     #import os
     # ========== FALLBACK FUNCTIONS FOR CORRUPTED DATA ==========
 
-    def extract_attribute_data(mesh_data, attr_name):
-        """Extract data from mesh attribute by name - optimized version"""
+    def get_face_quad_vertex_groups(mesh_data):
+        """Return one 4-vertex group per quad face for face-based gaussian sources."""
+        num_polygons = len(mesh_data.polygons)
+        if num_polygons == 0:
+            return None
+        face_vertex_indices = np.empty((num_polygons, 4), dtype=np.int32)
+        for poly_index, poly in enumerate(mesh_data.polygons):
+            poly_vertices = tuple(poly.vertices)
+            if len(poly_vertices) != 4:
+                return None
+            face_vertex_indices[poly_index] = poly_vertices
+        return face_vertex_indices
+
+    def collapse_attribute_values(data_array, face_vertex_indices, expected_vertex_count, attr_name):
+        """Collapse per-vertex attribute data down to one value per disconnected quad."""
+        if face_vertex_indices is None:
+            return data_array.astype(np.float32)
+        if len(data_array) == expected_vertex_count:
+            return data_array[face_vertex_indices].mean(axis=1).astype(np.float32)
+        if len(data_array) == len(face_vertex_indices):
+            return data_array.astype(np.float32)
+        raise ValueError(
+            f"Attribute '{attr_name}' has {len(data_array)} values, expected {expected_vertex_count} vertices "
+            f"or {len(face_vertex_indices)} face islands"
+        )
+
+    def extract_attribute_data(mesh_data, attr_name, face_vertex_indices=None, expected_vertex_count=None):
+        """Extract data from mesh attribute by name, with optional face-quad collapse."""
         if attr_name not in [attr.name for attr in mesh_data.attributes]:
             return None
         attr = mesh_data.attributes[attr_name]
         # Use foreach_get for much faster extraction
         data_array = np.zeros(len(attr.data), dtype=np.float32)
         attr.data.foreach_get("value", data_array)
-        return data_array
+        if expected_vertex_count is None:
+            expected_vertex_count = len(mesh_data.vertices)
+        return collapse_attribute_values(data_array, face_vertex_indices, expected_vertex_count, attr_name)
 
-    def extract_gaussian_data_from_evaluated_mesh(mesh_obj):
-        """Extract and process gaussian data from EVALUATED mesh object attributes"""
-        # Get evaluated mesh data
-        depsgraph = bpy.context.evaluated_depsgraph_get()
-        evaluated_object = mesh_obj.evaluated_get(depsgraph)
-        evaluated_mesh = evaluated_object.data
-        # Extract positions from evaluated vertices - optimized version
-        num_points = len(evaluated_mesh.vertices)
-        if num_points == 0:
-            raise ValueError("Evaluated mesh has no vertices")
-        # Use foreach_get for fast vertex coordinate extraction
-        positions = np.zeros(num_points * 3, dtype=np.float32)
-        evaluated_mesh.vertices.foreach_get("co", positions)
+    def extract_gaussian_data_from_mesh_data(mesh_data, mesh_name):
+        """Extract gaussian data and collapse disconnected face quads to one virtual point each."""
+        num_vertices = len(mesh_data.vertices)
+        if num_vertices == 0:
+            raise ValueError("Mesh has no vertices")
+        face_vertex_indices = get_face_quad_vertex_groups(mesh_data)
+        if face_vertex_indices is not None:
+            print(
+                f"  Face-quad source detected in '{mesh_name}', collapsing "
+                f"{num_vertices:,} quad vertices to {len(face_vertex_indices):,} splats"
+            )
+        positions = np.zeros(num_vertices * 3, dtype=np.float32)
+        mesh_data.vertices.foreach_get("co", positions)
         positions = positions.reshape(-1, 3)
-        # Get available attributes from evaluated mesh
-        available_attrs = [attr.name for attr in evaluated_mesh.attributes]
-        # Extract spherical harmonics from evaluated mesh
+        if face_vertex_indices is not None:
+            positions = positions[face_vertex_indices].mean(axis=1).astype(np.float32)
+        num_points = len(positions)
+        available_attrs = [attr.name for attr in mesh_data.attributes]
         if all(attr in available_attrs for attr in ['f_dc_0', 'f_dc_1', 'f_dc_2']):
-            dc_0 = extract_attribute_data(evaluated_mesh, 'f_dc_0')
-            dc_1 = extract_attribute_data(evaluated_mesh, 'f_dc_1')
-            dc_2 = extract_attribute_data(evaluated_mesh, 'f_dc_2')
-            features_dc = np.column_stack([dc_0, dc_1, dc_2])
-            # Find f_rest fields
+            dc_0 = extract_attribute_data(mesh_data, 'f_dc_0', face_vertex_indices, num_vertices)
+            dc_1 = extract_attribute_data(mesh_data, 'f_dc_1', face_vertex_indices, num_vertices)
+            dc_2 = extract_attribute_data(mesh_data, 'f_dc_2', face_vertex_indices, num_vertices)
+            features_dc = np.column_stack([dc_0, dc_1, dc_2]).astype(np.float32)
             f_rest_fields = [attr for attr in available_attrs if attr.startswith('f_rest_')]
             f_rest_fields = sorted(f_rest_fields, key=lambda x: int(x.split('_')[-1]))
             if f_rest_fields:
                 features_extra_list = []
                 for field in f_rest_fields:
-                    data = extract_attribute_data(evaluated_mesh, field)
+                    data = extract_attribute_data(mesh_data, field, face_vertex_indices, num_vertices)
                     if data is not None:
                         features_extra_list.append(data)
                 if features_extra_list:
-                    features_extra = np.column_stack(features_extra_list)
+                    features_extra = np.column_stack(features_extra_list).astype(np.float32)
                     num_f_rest = len(f_rest_fields)
-                    # Determine degree and coefficients to use
                     if num_f_rest >= 45:
                         actual_degree = 3
                         coeffs_to_use = 45
@@ -5856,7 +9233,7 @@ def sna_texture_creation_FD1B2():
                         features_extra_reshaped = np.transpose(features_extra_reshaped, [0, 2, 1])
                         features_dc_reshaped = features_dc.reshape(-1, 1, 3)
                         all_features = np.concatenate([features_dc_reshaped, features_extra_reshaped], axis=1)
-                        sh_coeffs = all_features.reshape(num_points, -1)
+                        sh_coeffs = all_features.reshape(num_points, -1).astype(np.float32)
                     else:
                         sh_coeffs = features_dc
                 else:
@@ -5864,49 +9241,54 @@ def sna_texture_creation_FD1B2():
             else:
                 sh_coeffs = features_dc
         else:
-            # Default SH coeffs if not found
             print(f"Warning: f_dc attributes not found on evaluated mesh, using defaults")
-            sh_coeffs = np.ones((num_points, 3)) * 0.28209479177387814
-        # Extract scales from evaluated mesh
+            sh_coeffs = np.ones((num_points, 3), dtype=np.float32) * 0.28209479177387814
         if all(attr in available_attrs for attr in ['scale_0', 'scale_1', 'scale_2']):
-            scale_0 = extract_attribute_data(evaluated_mesh, 'scale_0')
-            scale_1 = extract_attribute_data(evaluated_mesh, 'scale_1')
-            scale_2 = extract_attribute_data(evaluated_mesh, 'scale_2')
-            scales = np.column_stack([scale_0, scale_1, scale_2])
-            scales = np.exp(scales)  # Apply exponential
+            scale_0 = extract_attribute_data(mesh_data, 'scale_0', face_vertex_indices, num_vertices)
+            scale_1 = extract_attribute_data(mesh_data, 'scale_1', face_vertex_indices, num_vertices)
+            scale_2 = extract_attribute_data(mesh_data, 'scale_2', face_vertex_indices, num_vertices)
+            scales = np.column_stack([scale_0, scale_1, scale_2]).astype(np.float32)
+            scales = np.exp(scales)
         else:
             print(f"Warning: scale attributes not found on evaluated mesh, using defaults")
-            scales = np.ones((num_points, 3)) * 0.01
-        # Extract rotations from evaluated mesh
+            scales = np.ones((num_points, 3), dtype=np.float32) * 0.01
         if all(attr in available_attrs for attr in ['rot_0', 'rot_1', 'rot_2', 'rot_3']):
-            rot_0 = extract_attribute_data(evaluated_mesh, 'rot_0')
-            rot_1 = extract_attribute_data(evaluated_mesh, 'rot_1')
-            rot_2 = extract_attribute_data(evaluated_mesh, 'rot_2')
-            rot_3 = extract_attribute_data(evaluated_mesh, 'rot_3')
-            rotations = np.column_stack([rot_0, rot_1, rot_2, rot_3])
-            # Normalize quaternions
+            rot_0 = extract_attribute_data(mesh_data, 'rot_0', face_vertex_indices, num_vertices)
+            rot_1 = extract_attribute_data(mesh_data, 'rot_1', face_vertex_indices, num_vertices)
+            rot_2 = extract_attribute_data(mesh_data, 'rot_2', face_vertex_indices, num_vertices)
+            rot_3 = extract_attribute_data(mesh_data, 'rot_3', face_vertex_indices, num_vertices)
+            rotations = np.column_stack([rot_0, rot_1, rot_2, rot_3]).astype(np.float32)
             norms = np.linalg.norm(rotations, axis=1, keepdims=True)
+            norms[norms == 0.0] = 1.0
             rotations = rotations / norms
         else:
             print(f"Warning: rotation attributes not found on evaluated mesh, using defaults")
-            rotations = np.zeros((num_points, 4))
-            rotations[:, 0] = 1.0  # Identity quaternion
-        # Extract opacity from evaluated mesh
+            rotations = np.zeros((num_points, 4), dtype=np.float32)
+            rotations[:, 0] = 1.0
         if 'opacity' in available_attrs:
-            opacity_raw = extract_attribute_data(evaluated_mesh, 'opacity')
-            opacity = 1.0 / (1.0 + np.exp(-opacity_raw))  # Apply sigmoid
+            opacity_raw = extract_attribute_data(mesh_data, 'opacity', face_vertex_indices, num_vertices)
+            opacity = 1.0 / (1.0 + np.exp(-opacity_raw))
         else:
             print(f"Warning: opacity attribute not found on evaluated mesh, using defaults")
-            opacity = np.ones(num_points)
+            opacity = np.ones(num_points, dtype=np.float32)
         return {
             'num_points': num_points,
-            'positions': positions,
-            'scales': scales,
-            'rotations': rotations,
-            'opacities': opacity,
-            'sh_coeffs': sh_coeffs,
-            'sh_dim': sh_coeffs.shape[1]
+            'positions': positions.astype(np.float32),
+            'scales': scales.astype(np.float32),
+            'rotations': rotations.astype(np.float32),
+            'opacities': opacity.astype(np.float32),
+            'sh_coeffs': sh_coeffs.astype(np.float32),
+            'sh_dim': sh_coeffs.shape[1],
+            'used_face_quad_collapse': face_vertex_indices is not None,
         }
+
+    def extract_gaussian_data_from_evaluated_mesh(mesh_obj):
+        """Extract and process gaussian data from EVALUATED mesh object attributes"""
+        # Get evaluated mesh data
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        evaluated_object = mesh_obj.evaluated_get(depsgraph)
+        evaluated_mesh = evaluated_object.data
+        return extract_gaussian_data_from_mesh_data(evaluated_mesh, mesh_obj.name)
 
     def find_source_object_by_uuid(source_uuid):
         """Find Blender object by gaussian_source_uuid"""
@@ -5966,13 +9348,12 @@ def sna_texture_creation_FD1B2():
             return False, f"Fallback refresh failed: {e}"
 
     def refresh_object_from_ply_source(obj):
-        """Refresh gaussian data from PLY file - fallback function"""
+        """Refresh gaussian data from PLY file using the full SH fallback path"""
         try:
             ply_filepath = obj.get("ply_filepath")
             if not ply_filepath or not os.path.exists(ply_filepath):
                 return False, "PLY file not found or missing path"
             print(f"  🔄 Fallback: Refreshing {obj.name} from PLY {os.path.basename(ply_filepath)}")
-            # Simple PLY loading (minimal implementation for fallback)
             from plyfile import PlyData
             plydata = PlyData.read(ply_filepath)
             vertex_element = plydata.elements[0]
@@ -5985,12 +9366,41 @@ def sna_texture_creation_FD1B2():
             else:
                 return False, "PLY missing position coordinates"
             num_points = len(positions)
-            # Extract SH coefficients (simplified)
+            # Extract SH coefficients using the same full logic as the normal PLY loaders
             if all(attr in available_fields for attr in ['f_dc_0', 'f_dc_1', 'f_dc_2']):
                 dc_0 = vertex_data['f_dc_0']
                 dc_1 = vertex_data['f_dc_1'] 
                 dc_2 = vertex_data['f_dc_2']
-                sh_coeffs = np.column_stack([dc_0, dc_1, dc_2]).astype(np.float32)
+                features_dc = np.column_stack([dc_0, dc_1, dc_2])
+                f_rest_fields = [field for field in available_fields if field.startswith('f_rest_')]
+                f_rest_fields = sorted(f_rest_fields, key=lambda x: int(x.split('_')[-1]))
+                if f_rest_fields:
+                    features_extra = np.column_stack([vertex_data[field] for field in f_rest_fields])
+                    num_f_rest = len(f_rest_fields)
+                    if num_f_rest >= 45:
+                        actual_degree = 3
+                        coeffs_to_use = 45
+                    elif num_f_rest >= 24:
+                        actual_degree = 2
+                        coeffs_to_use = 24
+                    elif num_f_rest >= 9:
+                        actual_degree = 1
+                        coeffs_to_use = 9
+                    else:
+                        actual_degree = 0
+                        coeffs_to_use = 0
+                    if coeffs_to_use > 0:
+                        features_extra_used = features_extra[:, :coeffs_to_use]
+                        coeffs_per_degree = (actual_degree + 1) ** 2 - 1
+                        features_extra_reshaped = features_extra_used.reshape((num_points, 3, coeffs_per_degree))
+                        features_extra_reshaped = np.transpose(features_extra_reshaped, [0, 2, 1])
+                        features_dc_reshaped = features_dc.reshape(-1, 1, 3)
+                        all_features = np.concatenate([features_dc_reshaped, features_extra_reshaped], axis=1)
+                        sh_coeffs = all_features.reshape(num_points, -1).astype(np.float32)
+                    else:
+                        sh_coeffs = features_dc.astype(np.float32)
+                else:
+                    sh_coeffs = features_dc.astype(np.float32)
             else:
                 sh_coeffs = np.ones((num_points, 3), dtype=np.float32) * 0.28209479177387814
             # Extract scales
@@ -6270,9 +9680,9 @@ def sna_shader_system_A4AED():
     #COMPOSITE_FRAGMENT_SHADER_PATH = r"D:\3d\Blender\my work\KIRI\KIRI - Tools\KIRI - Blender 3DGS Render\SplatForge Adaption\shaders\composite_frag.glsl"
     MAX_GAUSSIANS = 1000000
     # ============================================
-    #import bpy
-    import gpu.types
-    import numpy as np
+    import gpu
+    from gpu_extras.batch import batch_for_shader
+    #import os
 
     def read_shader_file(filepath):
         try:
@@ -6383,7 +9793,8 @@ def sna_shader_system_A4AED():
         bpy.gaussian_quad_batch = quad_batch
         bpy.gaussian_composite_shader = composite_shader  
         bpy.gaussian_composite_batch = composite_batch
-        print("Multi-object shader system created successfully")
+        bpy.gaussian_shader_directory = os.path.normpath(os.path.dirname(VERTEX_SHADER_PATH))
+        print("Multi-object shader system created successfully (color precision + display fix)")
     except Exception as e:
         print(f"Error creating shader system: {e}")
         import traceback
@@ -6401,8 +9812,9 @@ def sna_c2_refresh_all_4D367(REFRESH_ALL_OBJECTS, UPDATE_TRANSFORMS, USE_EVALUAT
     #USE_EVALUATED_MESH = True          # Use evaluated mesh data (after modifiers) for Blender mesh sources
     # ============================================
     import numpy as np
-    #import time
-    from mathutils import Matrix
+    #import os
+    import uuid
+    from math import pi
     # Original PLY loader class (same as script_1a)
     class PlyLoader:
 
@@ -6506,15 +9918,141 @@ def sna_c2_refresh_all_4D367(REFRESH_ALL_OBJECTS, UPDATE_TRANSFORMS, USE_EVALUAT
         available_attrs = [attr.name for attr in mesh_obj.data.attributes]
         return all(attr in available_attrs for attr in required_attrs)
 
-    def extract_attribute_data(mesh_data, attr_name):
-        """Extract data from mesh attribute by name - optimized version"""
+    def get_face_quad_vertex_groups(mesh_data):
+        """Return one 4-vertex group per quad face for face-based gaussian sources."""
+        num_polygons = len(mesh_data.polygons)
+        if num_polygons == 0:
+            return None
+        face_vertex_indices = np.empty((num_polygons, 4), dtype=np.int32)
+        for poly_index, poly in enumerate(mesh_data.polygons):
+            poly_vertices = tuple(poly.vertices)
+            if len(poly_vertices) != 4:
+                return None
+            face_vertex_indices[poly_index] = poly_vertices
+        return face_vertex_indices
+
+    def collapse_attribute_values(data_array, face_vertex_indices, expected_vertex_count, attr_name):
+        """Collapse per-vertex attribute data down to one value per disconnected quad."""
+        if face_vertex_indices is None:
+            return data_array.astype(np.float32)
+        if len(data_array) == expected_vertex_count:
+            return data_array[face_vertex_indices].mean(axis=1).astype(np.float32)
+        if len(data_array) == len(face_vertex_indices):
+            return data_array.astype(np.float32)
+        raise ValueError(
+            f"Attribute '{attr_name}' has {len(data_array)} values, expected {expected_vertex_count} vertices "
+            f"or {len(face_vertex_indices)} face islands"
+        )
+
+    def extract_attribute_data(mesh_data, attr_name, face_vertex_indices=None, expected_vertex_count=None):
+        """Extract data from mesh attribute by name, with optional face-quad collapse."""
         if attr_name not in [attr.name for attr in mesh_data.attributes]:
             return None
         attr = mesh_data.attributes[attr_name]
         # Use foreach_get for much faster extraction
         data_array = np.zeros(len(attr.data), dtype=np.float32)
         attr.data.foreach_get("value", data_array)
-        return data_array
+        if expected_vertex_count is None:
+            expected_vertex_count = len(mesh_data.vertices)
+        return collapse_attribute_values(data_array, face_vertex_indices, expected_vertex_count, attr_name)
+
+    def extract_gaussian_data_from_mesh_data(mesh_data, mesh_name):
+        """Extract gaussian data and collapse disconnected face quads to one virtual point each."""
+        num_vertices = len(mesh_data.vertices)
+        if num_vertices == 0:
+            raise ValueError("Mesh has no vertices")
+        face_vertex_indices = get_face_quad_vertex_groups(mesh_data)
+        if face_vertex_indices is not None:
+            print(
+                f"Detected face-based gaussian mesh '{mesh_name}', collapsing "
+                f"{num_vertices:,} quad vertices to {len(face_vertex_indices):,} splats"
+            )
+        positions = np.zeros(num_vertices * 3, dtype=np.float32)
+        mesh_data.vertices.foreach_get("co", positions)
+        positions = positions.reshape(-1, 3)
+        if face_vertex_indices is not None:
+            positions = positions[face_vertex_indices].mean(axis=1).astype(np.float32)
+        num_points = len(positions)
+        available_attrs = [attr.name for attr in mesh_data.attributes]
+        if all(attr in available_attrs for attr in ['f_dc_0', 'f_dc_1', 'f_dc_2']):
+            dc_0 = extract_attribute_data(mesh_data, 'f_dc_0', face_vertex_indices, num_vertices)
+            dc_1 = extract_attribute_data(mesh_data, 'f_dc_1', face_vertex_indices, num_vertices)
+            dc_2 = extract_attribute_data(mesh_data, 'f_dc_2', face_vertex_indices, num_vertices)
+            features_dc = np.column_stack([dc_0, dc_1, dc_2]).astype(np.float32)
+            f_rest_fields = [attr for attr in available_attrs if attr.startswith('f_rest_')]
+            f_rest_fields = sorted(f_rest_fields, key=lambda x: int(x.split('_')[-1]))
+            if f_rest_fields:
+                features_extra_list = []
+                for field in f_rest_fields:
+                    data = extract_attribute_data(mesh_data, field, face_vertex_indices, num_vertices)
+                    if data is not None:
+                        features_extra_list.append(data)
+                if features_extra_list:
+                    features_extra = np.column_stack(features_extra_list).astype(np.float32)
+                    num_f_rest = len(f_rest_fields)
+                    if num_f_rest >= 45:
+                        actual_degree = 3
+                        coeffs_to_use = 45
+                    elif num_f_rest >= 24:
+                        actual_degree = 2
+                        coeffs_to_use = 24
+                    elif num_f_rest >= 9:
+                        actual_degree = 1
+                        coeffs_to_use = 9
+                    else:
+                        actual_degree = 0
+                        coeffs_to_use = 0
+                    if coeffs_to_use > 0:
+                        features_extra_used = features_extra[:, :coeffs_to_use]
+                        coeffs_per_degree = (actual_degree + 1) ** 2 - 1
+                        features_extra_reshaped = features_extra_used.reshape((num_points, 3, coeffs_per_degree))
+                        features_extra_reshaped = np.transpose(features_extra_reshaped, [0, 2, 1])
+                        features_dc_reshaped = features_dc.reshape(-1, 1, 3)
+                        all_features = np.concatenate([features_dc_reshaped, features_extra_reshaped], axis=1)
+                        sh_coeffs = all_features.reshape(num_points, -1).astype(np.float32)
+                    else:
+                        sh_coeffs = features_dc
+                else:
+                    sh_coeffs = features_dc
+            else:
+                sh_coeffs = features_dc
+        else:
+            sh_coeffs = np.ones((num_points, 3), dtype=np.float32) * 0.28209479177387814
+        if all(attr in available_attrs for attr in ['scale_0', 'scale_1', 'scale_2']):
+            scale_0 = extract_attribute_data(mesh_data, 'scale_0', face_vertex_indices, num_vertices)
+            scale_1 = extract_attribute_data(mesh_data, 'scale_1', face_vertex_indices, num_vertices)
+            scale_2 = extract_attribute_data(mesh_data, 'scale_2', face_vertex_indices, num_vertices)
+            scales = np.column_stack([scale_0, scale_1, scale_2]).astype(np.float32)
+            scales = np.exp(scales)
+        else:
+            scales = np.ones((num_points, 3), dtype=np.float32) * 0.01
+        if all(attr in available_attrs for attr in ['rot_0', 'rot_1', 'rot_2', 'rot_3']):
+            rot_0 = extract_attribute_data(mesh_data, 'rot_0', face_vertex_indices, num_vertices)
+            rot_1 = extract_attribute_data(mesh_data, 'rot_1', face_vertex_indices, num_vertices)
+            rot_2 = extract_attribute_data(mesh_data, 'rot_2', face_vertex_indices, num_vertices)
+            rot_3 = extract_attribute_data(mesh_data, 'rot_3', face_vertex_indices, num_vertices)
+            rotations = np.column_stack([rot_0, rot_1, rot_2, rot_3]).astype(np.float32)
+            norms = np.linalg.norm(rotations, axis=1, keepdims=True)
+            norms[norms == 0.0] = 1.0
+            rotations = rotations / norms
+        else:
+            rotations = np.zeros((num_points, 4), dtype=np.float32)
+            rotations[:, 0] = 1.0
+        if 'opacity' in available_attrs:
+            opacity_raw = extract_attribute_data(mesh_data, 'opacity', face_vertex_indices, num_vertices)
+            opacity = 1.0 / (1.0 + np.exp(-opacity_raw))
+        else:
+            opacity = np.ones(num_points, dtype=np.float32)
+        return {
+            'num_points': num_points,
+            'positions': positions.astype(np.float32),
+            'scales': scales.astype(np.float32),
+            'rotations': rotations.astype(np.float32),
+            'opacities': opacity.astype(np.float32),
+            'sh_coeffs': sh_coeffs.astype(np.float32),
+            'sh_dim': sh_coeffs.shape[1],
+            'used_face_quad_collapse': face_vertex_indices is not None,
+        }
 
     def extract_gaussian_data_from_evaluated_mesh(mesh_obj):
         """Extract and process gaussian data from EVALUATED mesh object attributes"""
@@ -6522,203 +10060,11 @@ def sna_c2_refresh_all_4D367(REFRESH_ALL_OBJECTS, UPDATE_TRANSFORMS, USE_EVALUAT
         depsgraph = bpy.context.evaluated_depsgraph_get()
         evaluated_object = mesh_obj.evaluated_get(depsgraph)
         evaluated_mesh = evaluated_object.data
-        # Extract positions from evaluated vertices - optimized version
-        num_points = len(evaluated_mesh.vertices)
-        if num_points == 0:
-            raise ValueError("Evaluated mesh has no vertices")
-        # Use foreach_get for fast vertex coordinate extraction
-        positions = np.zeros(num_points * 3, dtype=np.float32)
-        evaluated_mesh.vertices.foreach_get("co", positions)
-        positions = positions.reshape(-1, 3)
-        # Get available attributes from evaluated mesh
-        available_attrs = [attr.name for attr in evaluated_mesh.attributes]
-        # Extract spherical harmonics from evaluated mesh
-        if all(attr in available_attrs for attr in ['f_dc_0', 'f_dc_1', 'f_dc_2']):
-            dc_0 = extract_attribute_data(evaluated_mesh, 'f_dc_0')
-            dc_1 = extract_attribute_data(evaluated_mesh, 'f_dc_1')
-            dc_2 = extract_attribute_data(evaluated_mesh, 'f_dc_2')
-            features_dc = np.column_stack([dc_0, dc_1, dc_2])
-            # Find f_rest fields
-            f_rest_fields = [attr for attr in available_attrs if attr.startswith('f_rest_')]
-            f_rest_fields = sorted(f_rest_fields, key=lambda x: int(x.split('_')[-1]))
-            if f_rest_fields:
-                features_extra_list = []
-                for field in f_rest_fields:
-                    data = extract_attribute_data(evaluated_mesh, field)
-                    if data is not None:
-                        features_extra_list.append(data)
-                if features_extra_list:
-                    features_extra = np.column_stack(features_extra_list)
-                    num_f_rest = len(f_rest_fields)
-                    # Determine degree and coefficients to use
-                    if num_f_rest >= 45:
-                        actual_degree = 3
-                        coeffs_to_use = 45
-                    elif num_f_rest >= 24:
-                        actual_degree = 2  
-                        coeffs_to_use = 24
-                    elif num_f_rest >= 9:
-                        actual_degree = 1
-                        coeffs_to_use = 9
-                    else:
-                        actual_degree = 0
-                        coeffs_to_use = 0
-                    if coeffs_to_use > 0:
-                        features_extra_used = features_extra[:, :coeffs_to_use]
-                        coeffs_per_degree = (actual_degree + 1) ** 2 - 1
-                        features_extra_reshaped = features_extra_used.reshape((num_points, 3, coeffs_per_degree))
-                        features_extra_reshaped = np.transpose(features_extra_reshaped, [0, 2, 1])
-                        features_dc_reshaped = features_dc.reshape(-1, 1, 3)
-                        all_features = np.concatenate([features_dc_reshaped, features_extra_reshaped], axis=1)
-                        sh_coeffs = all_features.reshape(num_points, -1)
-                    else:
-                        sh_coeffs = features_dc
-                else:
-                    sh_coeffs = features_dc
-            else:
-                sh_coeffs = features_dc
-        else:
-            # Default SH coeffs if not found
-            print(f"Warning: f_dc attributes not found on evaluated mesh, using defaults")
-            sh_coeffs = np.ones((num_points, 3)) * 0.28209479177387814
-        # Extract scales from evaluated mesh
-        if all(attr in available_attrs for attr in ['scale_0', 'scale_1', 'scale_2']):
-            scale_0 = extract_attribute_data(evaluated_mesh, 'scale_0')
-            scale_1 = extract_attribute_data(evaluated_mesh, 'scale_1')
-            scale_2 = extract_attribute_data(evaluated_mesh, 'scale_2')
-            scales = np.column_stack([scale_0, scale_1, scale_2])
-            scales = np.exp(scales)  # Apply exponential
-        else:
-            print(f"Warning: scale attributes not found on evaluated mesh, using defaults")
-            scales = np.ones((num_points, 3)) * 0.01
-        # Extract rotations from evaluated mesh
-        if all(attr in available_attrs for attr in ['rot_0', 'rot_1', 'rot_2', 'rot_3']):
-            rot_0 = extract_attribute_data(evaluated_mesh, 'rot_0')
-            rot_1 = extract_attribute_data(evaluated_mesh, 'rot_1')
-            rot_2 = extract_attribute_data(evaluated_mesh, 'rot_2')
-            rot_3 = extract_attribute_data(evaluated_mesh, 'rot_3')
-            rotations = np.column_stack([rot_0, rot_1, rot_2, rot_3])
-            # Normalize quaternions
-            norms = np.linalg.norm(rotations, axis=1, keepdims=True)
-            rotations = rotations / norms
-        else:
-            print(f"Warning: rotation attributes not found on evaluated mesh, using defaults")
-            rotations = np.zeros((num_points, 4))
-            rotations[:, 0] = 1.0  # Identity quaternion
-        # Extract opacity from evaluated mesh
-        if 'opacity' in available_attrs:
-            opacity_raw = extract_attribute_data(evaluated_mesh, 'opacity')
-            opacity = 1.0 / (1.0 + np.exp(-opacity_raw))  # Apply sigmoid
-        else:
-            print(f"Warning: opacity attribute not found on evaluated mesh, using defaults")
-            opacity = np.ones(num_points)
-        return {
-            'num_points': num_points,
-            'positions': positions,
-            'scales': scales,
-            'rotations': rotations,
-            'opacities': opacity,
-            'sh_coeffs': sh_coeffs,
-            'sh_dim': sh_coeffs.shape[1]
-        }
+        return extract_gaussian_data_from_mesh_data(evaluated_mesh, mesh_obj.name)
 
     def extract_gaussian_data_from_mesh(mesh_obj):
         """Extract and process gaussian data from ORIGINAL mesh object attributes"""
-        # Extract positions from vertices - optimized version
-        num_points = len(mesh_obj.data.vertices)
-        if num_points == 0:
-            raise ValueError("Mesh has no vertices")
-        # Use foreach_get for fast vertex coordinate extraction
-        positions = np.zeros(num_points * 3, dtype=np.float32)
-        mesh_obj.data.vertices.foreach_get("co", positions)
-        positions = positions.reshape(-1, 3)
-        # Get available attributes
-        available_attrs = [attr.name for attr in mesh_obj.data.attributes]
-        # Extract spherical harmonics
-        if all(attr in available_attrs for attr in ['f_dc_0', 'f_dc_1', 'f_dc_2']):
-            dc_0 = extract_attribute_data(mesh_obj.data, 'f_dc_0')
-            dc_1 = extract_attribute_data(mesh_obj.data, 'f_dc_1')
-            dc_2 = extract_attribute_data(mesh_obj.data, 'f_dc_2')
-            features_dc = np.column_stack([dc_0, dc_1, dc_2])
-            # Find f_rest fields
-            f_rest_fields = [attr for attr in available_attrs if attr.startswith('f_rest_')]
-            f_rest_fields = sorted(f_rest_fields, key=lambda x: int(x.split('_')[-1]))
-            if f_rest_fields:
-                features_extra_list = []
-                for field in f_rest_fields:
-                    data = extract_attribute_data(mesh_obj.data, field)
-                    if data is not None:
-                        features_extra_list.append(data)
-                if features_extra_list:
-                    features_extra = np.column_stack(features_extra_list)
-                    num_f_rest = len(f_rest_fields)
-                    # Determine degree and coefficients to use
-                    if num_f_rest >= 45:
-                        actual_degree = 3
-                        coeffs_to_use = 45
-                    elif num_f_rest >= 24:
-                        actual_degree = 2  
-                        coeffs_to_use = 24
-                    elif num_f_rest >= 9:
-                        actual_degree = 1
-                        coeffs_to_use = 9
-                    else:
-                        actual_degree = 0
-                        coeffs_to_use = 0
-                    if coeffs_to_use > 0:
-                        features_extra_used = features_extra[:, :coeffs_to_use]
-                        coeffs_per_degree = (actual_degree + 1) ** 2 - 1
-                        features_extra_reshaped = features_extra_used.reshape((num_points, 3, coeffs_per_degree))
-                        features_extra_reshaped = np.transpose(features_extra_reshaped, [0, 2, 1])
-                        features_dc_reshaped = features_dc.reshape(-1, 1, 3)
-                        all_features = np.concatenate([features_dc_reshaped, features_extra_reshaped], axis=1)
-                        sh_coeffs = all_features.reshape(num_points, -1)
-                    else:
-                        sh_coeffs = features_dc
-                else:
-                    sh_coeffs = features_dc
-            else:
-                sh_coeffs = features_dc
-        else:
-            # Default SH coeffs if not found
-            sh_coeffs = np.ones((num_points, 3)) * 0.28209479177387814
-        # Extract scales
-        if all(attr in available_attrs for attr in ['scale_0', 'scale_1', 'scale_2']):
-            scale_0 = extract_attribute_data(mesh_obj.data, 'scale_0')
-            scale_1 = extract_attribute_data(mesh_obj.data, 'scale_1')
-            scale_2 = extract_attribute_data(mesh_obj.data, 'scale_2')
-            scales = np.column_stack([scale_0, scale_1, scale_2])
-            scales = np.exp(scales)  # Apply exponential
-        else:
-            scales = np.ones((num_points, 3)) * 0.01
-        # Extract rotations
-        if all(attr in available_attrs for attr in ['rot_0', 'rot_1', 'rot_2', 'rot_3']):
-            rot_0 = extract_attribute_data(mesh_obj.data, 'rot_0')
-            rot_1 = extract_attribute_data(mesh_obj.data, 'rot_1')
-            rot_2 = extract_attribute_data(mesh_obj.data, 'rot_2')
-            rot_3 = extract_attribute_data(mesh_obj.data, 'rot_3')
-            rotations = np.column_stack([rot_0, rot_1, rot_2, rot_3])
-            # Normalize quaternions
-            norms = np.linalg.norm(rotations, axis=1, keepdims=True)
-            rotations = rotations / norms
-        else:
-            rotations = np.zeros((num_points, 4))
-            rotations[:, 0] = 1.0  # Identity quaternion
-        # Extract opacity
-        if 'opacity' in available_attrs:
-            opacity_raw = extract_attribute_data(mesh_obj.data, 'opacity')
-            opacity = 1.0 / (1.0 + np.exp(-opacity_raw))  # Apply sigmoid
-        else:
-            opacity = np.ones(num_points)
-        return {
-            'num_points': num_points,
-            'positions': positions,
-            'scales': scales,
-            'rotations': rotations,
-            'opacities': opacity,
-            'sh_coeffs': sh_coeffs,
-            'sh_dim': sh_coeffs.shape[1]
-        }
+        return extract_gaussian_data_from_mesh_data(mesh_obj.data, mesh_obj.name)
 
     def get_file_modification_time(filepath):
         """Get file modification time, return 0 if file doesn't exist"""
@@ -6969,7 +10315,6 @@ def sna_b2_load_from_blender_object_F0CCB(OBJECT_BASE_NAME):
     # ============================================
     import numpy as np
     from math import pi
-    #import time
 
     def get_unique_object_name(base_name):
         """Generate unique object name with auto-numbering"""
@@ -6989,56 +10334,83 @@ def sna_b2_load_from_blender_object_F0CCB(OBJECT_BASE_NAME):
         available_attrs = [attr.name for attr in mesh_obj.data.attributes]
         return all(attr in available_attrs for attr in required_attrs)
 
-    def extract_attribute_data(mesh_data, attr_name):
-        """Extract data from mesh attribute by name - optimized version"""
+    def get_face_quad_vertex_groups(mesh_data):
+        """Return one 4-vertex group per quad face for face-based gaussian sources."""
+        num_polygons = len(mesh_data.polygons)
+        if num_polygons == 0:
+            return None
+        face_vertex_indices = np.empty((num_polygons, 4), dtype=np.int32)
+        for poly_index, poly in enumerate(mesh_data.polygons):
+            poly_vertices = tuple(poly.vertices)
+            if len(poly_vertices) != 4:
+                return None
+            face_vertex_indices[poly_index] = poly_vertices
+        return face_vertex_indices
+
+    def collapse_attribute_values(data_array, face_vertex_indices, expected_vertex_count, attr_name):
+        """Collapse per-vertex attribute data down to one value per disconnected quad."""
+        if face_vertex_indices is None:
+            return data_array.astype(np.float32)
+        if len(data_array) == expected_vertex_count:
+            return data_array[face_vertex_indices].mean(axis=1).astype(np.float32)
+        if len(data_array) == len(face_vertex_indices):
+            return data_array.astype(np.float32)
+        raise ValueError(
+            f"Attribute '{attr_name}' has {len(data_array)} values, expected {expected_vertex_count} vertices "
+            f"or {len(face_vertex_indices)} face islands"
+        )
+
+    def extract_attribute_data(mesh_data, attr_name, face_vertex_indices=None, expected_vertex_count=None):
+        """Extract data from mesh attribute by name, with optional face-quad collapse."""
         if attr_name not in [attr.name for attr in mesh_data.attributes]:
             return None
         attr = mesh_data.attributes[attr_name]
         # Use foreach_get for much faster extraction
         data_array = np.zeros(len(attr.data), dtype=np.float32)
         attr.data.foreach_get("value", data_array)
-        return data_array
+        if expected_vertex_count is None:
+            expected_vertex_count = len(mesh_data.vertices)
+        return collapse_attribute_values(data_array, face_vertex_indices, expected_vertex_count, attr_name)
 
-    def extract_gaussian_data_from_evaluated_mesh(mesh_obj):
-        """Extract and process gaussian data from EVALUATED mesh object attributes"""
-        # Get evaluated mesh data
-        depsgraph = bpy.context.evaluated_depsgraph_get()
-        evaluated_object = mesh_obj.evaluated_get(depsgraph)
-        evaluated_mesh = evaluated_object.data
-        # Extract positions from evaluated vertices - optimized version
-        num_points = len(evaluated_mesh.vertices)
-        if num_points == 0:
-            raise ValueError("Evaluated mesh has no vertices")
-        # Use foreach_get for fast vertex coordinate extraction
-        positions = np.zeros(num_points * 3, dtype=np.float32)
-        evaluated_mesh.vertices.foreach_get("co", positions)
+    def extract_gaussian_data_from_mesh_data(mesh_data, mesh_name):
+        """Extract gaussian data and collapse disconnected face quads to one virtual point each."""
+        num_vertices = len(mesh_data.vertices)
+        if num_vertices == 0:
+            raise ValueError("Mesh has no vertices")
+        face_vertex_indices = get_face_quad_vertex_groups(mesh_data)
+        if face_vertex_indices is not None:
+            print(
+                f"Detected face-based gaussian mesh '{mesh_name}', collapsing "
+                f"{num_vertices:,} quad vertices to {len(face_vertex_indices):,} splats"
+            )
+        positions = np.zeros(num_vertices * 3, dtype=np.float32)
+        mesh_data.vertices.foreach_get("co", positions)
         positions = positions.reshape(-1, 3)
-        # Get available attributes from evaluated mesh
-        available_attrs = [attr.name for attr in evaluated_mesh.attributes]
-        # Extract spherical harmonics from evaluated mesh
+        if face_vertex_indices is not None:
+            positions = positions[face_vertex_indices].mean(axis=1).astype(np.float32)
+        num_points = len(positions)
+        available_attrs = [attr.name for attr in mesh_data.attributes]
         if all(attr in available_attrs for attr in ['f_dc_0', 'f_dc_1', 'f_dc_2']):
-            dc_0 = extract_attribute_data(evaluated_mesh, 'f_dc_0')
-            dc_1 = extract_attribute_data(evaluated_mesh, 'f_dc_1')
-            dc_2 = extract_attribute_data(evaluated_mesh, 'f_dc_2')
-            features_dc = np.column_stack([dc_0, dc_1, dc_2])
-            # Find f_rest fields
+            dc_0 = extract_attribute_data(mesh_data, 'f_dc_0', face_vertex_indices, num_vertices)
+            dc_1 = extract_attribute_data(mesh_data, 'f_dc_1', face_vertex_indices, num_vertices)
+            dc_2 = extract_attribute_data(mesh_data, 'f_dc_2', face_vertex_indices, num_vertices)
+            features_dc = np.column_stack([dc_0, dc_1, dc_2]).astype(np.float32)
             f_rest_fields = [attr for attr in available_attrs if attr.startswith('f_rest_')]
             f_rest_fields = sorted(f_rest_fields, key=lambda x: int(x.split('_')[-1]))
             if f_rest_fields:
                 features_extra_list = []
                 for field in f_rest_fields:
-                    data = extract_attribute_data(evaluated_mesh, field)
+                    data = extract_attribute_data(mesh_data, field, face_vertex_indices, num_vertices)
                     if data is not None:
                         features_extra_list.append(data)
                 if features_extra_list:
-                    features_extra = np.column_stack(features_extra_list)
+                    features_extra = np.column_stack(features_extra_list).astype(np.float32)
                     num_f_rest = len(f_rest_fields)
-                    # Determine degree and coefficients to use
                     if num_f_rest >= 45:
                         actual_degree = 3
                         coeffs_to_use = 45
                     elif num_f_rest >= 24:
-                        actual_degree = 2  
+                        actual_degree = 2
                         coeffs_to_use = 24
                     elif num_f_rest >= 9:
                         actual_degree = 1
@@ -7053,7 +10425,7 @@ def sna_b2_load_from_blender_object_F0CCB(OBJECT_BASE_NAME):
                         features_extra_reshaped = np.transpose(features_extra_reshaped, [0, 2, 1])
                         features_dc_reshaped = features_dc.reshape(-1, 1, 3)
                         all_features = np.concatenate([features_dc_reshaped, features_extra_reshaped], axis=1)
-                        sh_coeffs = all_features.reshape(num_points, -1)
+                        sh_coeffs = all_features.reshape(num_points, -1).astype(np.float32)
                     else:
                         sh_coeffs = features_dc
                 else:
@@ -7061,49 +10433,54 @@ def sna_b2_load_from_blender_object_F0CCB(OBJECT_BASE_NAME):
             else:
                 sh_coeffs = features_dc
         else:
-            # Default SH coeffs if not found
             print(f"Warning: f_dc attributes not found on evaluated mesh, using defaults")
-            sh_coeffs = np.ones((num_points, 3)) * 0.28209479177387814
-        # Extract scales from evaluated mesh
+            sh_coeffs = np.ones((num_points, 3), dtype=np.float32) * 0.28209479177387814
         if all(attr in available_attrs for attr in ['scale_0', 'scale_1', 'scale_2']):
-            scale_0 = extract_attribute_data(evaluated_mesh, 'scale_0')
-            scale_1 = extract_attribute_data(evaluated_mesh, 'scale_1')
-            scale_2 = extract_attribute_data(evaluated_mesh, 'scale_2')
-            scales = np.column_stack([scale_0, scale_1, scale_2])
-            scales = np.exp(scales)  # Apply exponential
+            scale_0 = extract_attribute_data(mesh_data, 'scale_0', face_vertex_indices, num_vertices)
+            scale_1 = extract_attribute_data(mesh_data, 'scale_1', face_vertex_indices, num_vertices)
+            scale_2 = extract_attribute_data(mesh_data, 'scale_2', face_vertex_indices, num_vertices)
+            scales = np.column_stack([scale_0, scale_1, scale_2]).astype(np.float32)
+            scales = np.exp(scales)
         else:
             print(f"Warning: scale attributes not found on evaluated mesh, using defaults")
-            scales = np.ones((num_points, 3)) * 0.01
-        # Extract rotations from evaluated mesh
+            scales = np.ones((num_points, 3), dtype=np.float32) * 0.01
         if all(attr in available_attrs for attr in ['rot_0', 'rot_1', 'rot_2', 'rot_3']):
-            rot_0 = extract_attribute_data(evaluated_mesh, 'rot_0')
-            rot_1 = extract_attribute_data(evaluated_mesh, 'rot_1')
-            rot_2 = extract_attribute_data(evaluated_mesh, 'rot_2')
-            rot_3 = extract_attribute_data(evaluated_mesh, 'rot_3')
-            rotations = np.column_stack([rot_0, rot_1, rot_2, rot_3])
-            # Normalize quaternions
+            rot_0 = extract_attribute_data(mesh_data, 'rot_0', face_vertex_indices, num_vertices)
+            rot_1 = extract_attribute_data(mesh_data, 'rot_1', face_vertex_indices, num_vertices)
+            rot_2 = extract_attribute_data(mesh_data, 'rot_2', face_vertex_indices, num_vertices)
+            rot_3 = extract_attribute_data(mesh_data, 'rot_3', face_vertex_indices, num_vertices)
+            rotations = np.column_stack([rot_0, rot_1, rot_2, rot_3]).astype(np.float32)
             norms = np.linalg.norm(rotations, axis=1, keepdims=True)
+            norms[norms == 0.0] = 1.0
             rotations = rotations / norms
         else:
             print(f"Warning: rotation attributes not found on evaluated mesh, using defaults")
-            rotations = np.zeros((num_points, 4))
-            rotations[:, 0] = 1.0  # Identity quaternion
-        # Extract opacity from evaluated mesh
+            rotations = np.zeros((num_points, 4), dtype=np.float32)
+            rotations[:, 0] = 1.0
         if 'opacity' in available_attrs:
-            opacity_raw = extract_attribute_data(evaluated_mesh, 'opacity')
-            opacity = 1.0 / (1.0 + np.exp(-opacity_raw))  # Apply sigmoid
+            opacity_raw = extract_attribute_data(mesh_data, 'opacity', face_vertex_indices, num_vertices)
+            opacity = 1.0 / (1.0 + np.exp(-opacity_raw))
         else:
             print(f"Warning: opacity attribute not found on evaluated mesh, using defaults")
-            opacity = np.ones(num_points)
+            opacity = np.ones(num_points, dtype=np.float32)
         return {
             'num_points': num_points,
-            'positions': positions,
-            'scales': scales,
-            'rotations': rotations,
-            'opacities': opacity,
-            'sh_coeffs': sh_coeffs,
-            'sh_dim': sh_coeffs.shape[1]
+            'positions': positions.astype(np.float32),
+            'scales': scales.astype(np.float32),
+            'rotations': rotations.astype(np.float32),
+            'opacities': opacity.astype(np.float32),
+            'sh_coeffs': sh_coeffs.astype(np.float32),
+            'sh_dim': sh_coeffs.shape[1],
+            'used_face_quad_collapse': face_vertex_indices is not None,
         }
+
+    def extract_gaussian_data_from_evaluated_mesh(mesh_obj):
+        """Extract and process gaussian data from EVALUATED mesh object attributes"""
+        # Get evaluated mesh data
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        evaluated_object = mesh_obj.evaluated_get(depsgraph)
+        evaluated_mesh = evaluated_object.data
+        return extract_gaussian_data_from_mesh_data(evaluated_mesh, mesh_obj.name)
     try:
         # Determine source mesh object
         if SOURCE_MESH_OBJECT is not None:
@@ -7207,230 +10584,17 @@ def sna_render_new_menu_66133(layout_function, ):
     if not True: grid_DDB98.operator_context = "EXEC_DEFAULT"
     grid_DDB98.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_main_mode', text=bpy.context.scene.sna_dgs_scene_properties.r2_main_mode, icon_value=0, emboss=True, expand=True)
     if bpy.context.scene.sna_dgs_scene_properties.r2_main_mode == "Update":
-        box_10F75 = layout_function.box()
-        box_10F75.alert = False
-        box_10F75.enabled = True
-        box_10F75.active = True
-        box_10F75.use_property_split = False
-        box_10F75.use_property_decorate = False
-        box_10F75.alignment = 'Expand'.upper()
-        box_10F75.scale_x = 1.0
-        box_10F75.scale_y = 1.0
-        if not True: box_10F75.operator_context = "EXEC_DEFAULT"
-        box_10F75.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_hide_on_change', text='Hide / Show Objects On Menu Change*', icon_value=0, emboss=True)
-        box_10F75.label(text='*Vert Imported objects only', icon_value=0)
-        box_10F75.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_transforms', text='Copy Source Transforms', icon_value=0, emboss=True)
-        box_10F75.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_selected', text='Selected Empties Only', icon_value=0, emboss=True)
-        col_1EFCE = box_10F75.column(heading='', align=False)
-        col_1EFCE.alert = False
-        col_1EFCE.enabled = (not ((bpy.context.scene.sna_dgs_scene_properties.r2_update_type == 'Interval Update') and (not bpy.context.scene.sna_dgs_scene_properties.r2_interval_stop)))
-        col_1EFCE.active = True
-        col_1EFCE.use_property_split = False
-        col_1EFCE.use_property_decorate = False
-        col_1EFCE.scale_x = 1.0
-        col_1EFCE.scale_y = 1.0
-        col_1EFCE.alignment = 'Expand'.upper()
-        col_1EFCE.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
-        row_F6BE9 = col_1EFCE.row(heading='', align=False)
-        row_F6BE9.alert = False
-        row_F6BE9.enabled = True
-        row_F6BE9.active = True
-        row_F6BE9.use_property_split = False
-        row_F6BE9.use_property_decorate = False
-        row_F6BE9.scale_x = 1.0
-        row_F6BE9.scale_y = 1.0
-        row_F6BE9.alignment = 'Expand'.upper()
-        row_F6BE9.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
-        row_F6BE9.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_update_type', text=bpy.context.scene.sna_dgs_scene_properties.r2_update_type, icon_value=0, emboss=True, expand=True)
-        if (bpy.context.scene.sna_dgs_scene_properties.r2_update_type == 'Interval Update'):
-            col_1EFCE.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_interval', text='Interval Time (Seconds)', icon_value=0, emboss=True, expand=True)
-        col_5B10D = col_1EFCE.column(heading='', align=False)
-        col_5B10D.alert = False
-        col_5B10D.enabled = True
-        col_5B10D.active = True
-        col_5B10D.use_property_split = False
-        col_5B10D.use_property_decorate = False
-        col_5B10D.scale_x = 1.0
-        col_5B10D.scale_y = 2.0
-        col_5B10D.alignment = 'Expand'.upper()
-        col_5B10D.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
-        op = col_5B10D.operator('sna.dgs_render_refresh_scene_c0b35', text='Update Scene', icon_value=(load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'play.svg')) if (bpy.context.scene.sna_dgs_scene_properties.r2_update_type == 'Interval Update') else load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'update.svg'))), emboss=True, depress=False)
-        if ((bpy.context.scene.sna_dgs_scene_properties.r2_update_type == 'Interval Update') and (not bpy.context.scene.sna_dgs_scene_properties.r2_interval_stop)):
-            col_79A7A = box_10F75.column(heading='', align=False)
-            col_79A7A.alert = True
-            col_79A7A.enabled = True
-            col_79A7A.active = True
-            col_79A7A.use_property_split = False
-            col_79A7A.use_property_decorate = False
-            col_79A7A.scale_x = 1.0
-            col_79A7A.scale_y = 2.0
-            col_79A7A.alignment = 'Expand'.upper()
-            col_79A7A.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
-            op = col_79A7A.operator('sna.dgs_render_stop_interval_updates_5ac80', text='Stop', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'stop.svg')), emboss=True, depress=False)
-        if bpy.context.scene.sna_dgs_scene_properties.show_tips:
-            col_16809 = box_10F75.column(heading='', align=False)
-            col_16809.alert = False
-            col_16809.enabled = True
-            col_16809.active = True
-            col_16809.use_property_split = False
-            col_16809.use_property_decorate = False
-            col_16809.scale_x = 1.0
-            col_16809.scale_y = 1.0
-            col_16809.alignment = 'Expand'.upper()
-            col_16809.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
-            if (bpy.context.scene.sna_dgs_scene_properties.r2_update_type == 'Interval Update'):
-                box_FC0BD = col_16809.box()
-                box_FC0BD.alert = False
-                box_FC0BD.enabled = True
-                box_FC0BD.active = True
-                box_FC0BD.use_property_split = False
-                box_FC0BD.use_property_decorate = False
-                box_FC0BD.alignment = 'Expand'.upper()
-                box_FC0BD.scale_x = 1.0
-                box_FC0BD.scale_y = 1.0
-                if not True: box_FC0BD.operator_context = "EXEC_DEFAULT"
-                box_FC0BD.label(text='Interval Updates are intensive and', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
-                box_FC0BD.label(text='not recommended for most scans. Use it', icon_value=0)
-                box_FC0BD.label(text='to preview single, small object animations.', icon_value=0)
-                box_FC0BD.label(text='Use with caution', icon_value=0)
-            box_AC001 = col_16809.box()
-            box_AC001.alert = False
-            box_AC001.enabled = True
-            box_AC001.active = True
-            box_AC001.use_property_split = False
-            box_AC001.use_property_decorate = False
-            box_AC001.alignment = 'Expand'.upper()
-            box_AC001.scale_x = 1.0
-            box_AC001.scale_y = 1.0
-            if not True: box_AC001.operator_context = "EXEC_DEFAULT"
-            box_AC001.label(text='If rendering multiple objects and some', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
-            box_AC001.label(text='disappear. Try switching between Edit and', icon_value=0)
-            box_AC001.label(text='Render modes.', icon_value=0)
-            box_6A92E = col_16809.box()
-            box_6A92E.alert = False
-            box_6A92E.enabled = True
-            box_6A92E.active = True
-            box_6A92E.use_property_split = False
-            box_6A92E.use_property_decorate = False
-            box_6A92E.alignment = 'Expand'.upper()
-            box_6A92E.scale_x = 1.0
-            box_6A92E.scale_y = 1.0
-            if not True: box_6A92E.operator_context = "EXEC_DEFAULT"
-            box_6A92E.label(text='If depth sorting fails (objects appear', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
-            box_6A92E.label(text='cloudy or background is in front) Move the', icon_value=0)
-            box_6A92E.label(text='camera with Shit+Middle Mouse', icon_value=0)
+        layout_function = layout_function
+        sna_r2_update_menu_6A492(layout_function, )
     elif bpy.context.scene.sna_dgs_scene_properties.r2_main_mode == "Create":
-        col_0F0D4 = layout_function.column(heading='', align=False)
-        col_0F0D4.alert = False
-        col_0F0D4.enabled = True
-        col_0F0D4.active = True
-        col_0F0D4.use_property_split = False
-        col_0F0D4.use_property_decorate = False
-        col_0F0D4.scale_x = 1.0
-        col_0F0D4.scale_y = 1.0
-        col_0F0D4.alignment = 'Expand'.upper()
-        col_0F0D4.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
-        box_66033 = col_0F0D4.box()
-        box_66033.alert = False
-        box_66033.enabled = (not (bpy.context.view_layer.objects.active == None))
-        box_66033.active = True
-        box_66033.use_property_split = False
-        box_66033.use_property_decorate = False
-        box_66033.alignment = 'Expand'.upper()
-        box_66033.scale_x = 1.0
-        box_66033.scale_y = 1.0
-        if not True: box_66033.operator_context = "EXEC_DEFAULT"
-        op = box_66033.operator('sna.dgs_render_create_proxy_from_mesh_d5b41', text='Create Proxy From Active', icon_value=0, emboss=True, depress=False)
-        if (bpy.context.view_layer.objects.active == None):
-            box_383DE = col_0F0D4.box()
-            box_383DE.alert = False
-            box_383DE.enabled = True
-            box_383DE.active = True
-            box_383DE.use_property_split = False
-            box_383DE.use_property_decorate = False
-            box_383DE.alignment = 'Expand'.upper()
-            box_383DE.scale_x = 1.0
-            box_383DE.scale_y = 1.0
-            if not True: box_383DE.operator_context = "EXEC_DEFAULT"
-            box_383DE.label(text='No Active Object', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
+        layout_function = layout_function
+        sna_r2_create_menu_03F72(layout_function, )
     elif bpy.context.scene.sna_dgs_scene_properties.r2_main_mode == "Render":
-        box_AC05E = layout_function.box()
-        box_AC05E.alert = False
-        box_AC05E.enabled = True
-        box_AC05E.active = True
-        box_AC05E.use_property_split = False
-        box_AC05E.use_property_decorate = False
-        box_AC05E.alignment = 'Expand'.upper()
-        box_AC05E.scale_x = 1.0
-        box_AC05E.scale_y = 1.0
-        if not True: box_AC05E.operator_context = "EXEC_DEFAULT"
-        box_AC05E.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_animation', text='Render Animation', icon_value=0, emboss=True)
-        box_AC05E.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_color', text='Color Pass', icon_value=0, emboss=True)
-        box_AC05E.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_depth', text='Depth Pass', icon_value=0, emboss=True)
-        box_AC05E.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_comp', text='Combine With Native Render', icon_value=0, emboss=True)
-        box_AC05E.prop(bpy.context.scene.render, 'filepath', text='Output', icon_value=0, emboss=True)
-        col_B2DE2 = box_AC05E.column(heading='', align=False)
-        col_B2DE2.alert = False
-        col_B2DE2.enabled = ((bpy.context.scene.camera != None) and (bpy.context.scene.render.filepath != ''))
-        col_B2DE2.active = True
-        col_B2DE2.use_property_split = False
-        col_B2DE2.use_property_decorate = False
-        col_B2DE2.scale_x = 1.0
-        col_B2DE2.scale_y = 2.0
-        col_B2DE2.alignment = 'Expand'.upper()
-        col_B2DE2.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
-        op = col_B2DE2.operator('sna.dgs_render_advanced_render_ba196', text='Render', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'camera.svg')), emboss=True, depress=False)
-        if (bpy.context.scene.camera == None):
-            box_6E0B8 = box_AC05E.box()
-            box_6E0B8.alert = False
-            box_6E0B8.enabled = True
-            box_6E0B8.active = True
-            box_6E0B8.use_property_split = False
-            box_6E0B8.use_property_decorate = False
-            box_6E0B8.alignment = 'Expand'.upper()
-            box_6E0B8.scale_x = 1.0
-            box_6E0B8.scale_y = 1.0
-            if not True: box_6E0B8.operator_context = "EXEC_DEFAULT"
-            box_6E0B8.label(text='No Active Camera Found In Scene', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
-        if (bpy.context.scene.render.filepath == ''):
-            box_FF283 = box_AC05E.box()
-            box_FF283.alert = False
-            box_FF283.enabled = True
-            box_FF283.active = True
-            box_FF283.use_property_split = False
-            box_FF283.use_property_decorate = False
-            box_FF283.alignment = 'Expand'.upper()
-            box_FF283.scale_x = 1.0
-            box_FF283.scale_y = 1.0
-            if not True: box_FF283.operator_context = "EXEC_DEFAULT"
-            box_FF283.label(text='Output is empty', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
-        if bpy.context.scene.sna_dgs_scene_properties.show_tips:
-            box_BE1D0 = box_AC05E.box()
-            box_BE1D0.alert = False
-            box_BE1D0.enabled = True
-            box_BE1D0.active = True
-            box_BE1D0.use_property_split = False
-            box_BE1D0.use_property_decorate = False
-            box_BE1D0.alignment = 'Expand'.upper()
-            box_BE1D0.scale_x = 1.0
-            box_BE1D0.scale_y = 1.0
-            if not True: box_BE1D0.operator_context = "EXEC_DEFAULT"
-            box_BE1D0.label(text='For light reactive Splats, render', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
-            box_BE1D0.label(text="mesh 3DGS objects while in the addon's", icon_value=0)
-            box_BE1D0.label(text='Edit mode', icon_value=0)
+        layout_function = layout_function
+        sna_r2_render_menu_7AD0F(layout_function, )
     elif bpy.context.scene.sna_dgs_scene_properties.r2_main_mode == "Clean Up":
-        box_32F4A = layout_function.box()
-        box_32F4A.alert = False
-        box_32F4A.enabled = True
-        box_32F4A.active = True
-        box_32F4A.use_property_split = False
-        box_32F4A.use_property_decorate = False
-        box_32F4A.alignment = 'Expand'.upper()
-        box_32F4A.scale_x = 1.0
-        box_32F4A.scale_y = 1.0
-        if not True: box_32F4A.operator_context = "EXEC_DEFAULT"
-        box_32F4A.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_clear_empties', text='Delete All Proxy Empties', icon_value=0, emboss=True)
-        op = box_32F4A.operator('sna.dgs_render_clean_up_advanced_render_scene_09450', text='Stop Viewport Rendering', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'trash.svg')), emboss=True, depress=False)
+        layout_function = layout_function
+        sna_r2_cleanup_menu_09B59(layout_function, )
     else:
         pass
     if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Adjust_Attributes_GN' in bpy.context.view_layer.objects.active.modifiers):
@@ -7459,86 +10623,104 @@ def sna_render_new_menu_66133(layout_function, ):
         sna_attribute_adjust_properties_2C323(layout_function, )
 
 
-class SNA_OT_Dgs_Render_Refresh_Scene_C0B35(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_refresh_scene_c0b35"
-    bl_label = "3DGS Render: Refresh Scene"
-    bl_description = ""
-    bl_options = {"REGISTER", "UNDO"}
+def sna_r2_render_menu_7AD0F(layout_function, ):
+    box_3D205 = layout_function.box()
+    box_3D205.alert = False
+    box_3D205.enabled = True
+    box_3D205.active = True
+    box_3D205.use_property_split = False
+    box_3D205.use_property_decorate = False
+    box_3D205.alignment = 'Expand'.upper()
+    box_3D205.scale_x = 1.0
+    box_3D205.scale_y = 1.0
+    if not True: box_3D205.operator_context = "EXEC_DEFAULT"
+    box_3D205.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_sh_degree', text='SH Degrees', icon_value=0, emboss=True)
+    box_3D205.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_animation', text='Render Animation', icon_value=0, emboss=True)
+    box_3D205.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_color', text='Export Color Pass', icon_value=0, emboss=True)
+    box_3D205.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_depth', text='Export Depth Pass', icon_value=0, emboss=True)
+    box_3D205.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_comp', text='Combine With Native Render', icon_value=0, emboss=True)
+    box_3D205.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_delete_temp_files', text='Delete Temp Files', icon_value=0, emboss=True)
+    split_A5CFC = box_3D205.split(factor=0.5, align=False)
+    split_A5CFC.alert = False
+    split_A5CFC.enabled = True
+    split_A5CFC.active = True
+    split_A5CFC.use_property_split = False
+    split_A5CFC.use_property_decorate = False
+    split_A5CFC.scale_x = 1.0
+    split_A5CFC.scale_y = 1.0
+    split_A5CFC.alignment = 'Expand'.upper()
+    if not True: split_A5CFC.operator_context = "EXEC_DEFAULT"
+    split_A5CFC.label(text='Rig Behaviour', icon_value=0)
+    split_A5CFC.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_render_rig_cache_mode', text='', icon_value=0, emboss=True)
+    col_A8B0F = box_3D205.column(heading='', align=False)
+    col_A8B0F.alert = False
+    col_A8B0F.enabled = ((bpy.context.scene.camera != None) and (bpy.context.scene.render.filepath != '') and (bpy.context.scene.render.image_settings.media_type == 'IMAGE') and (bpy.context.scene.sna_dgs_scene_properties.r2_color or bpy.context.scene.sna_dgs_scene_properties.r2_depth))
+    col_A8B0F.active = True
+    col_A8B0F.use_property_split = False
+    col_A8B0F.use_property_decorate = False
+    col_A8B0F.scale_x = 1.0
+    col_A8B0F.scale_y = 2.0
+    col_A8B0F.alignment = 'Expand'.upper()
+    col_A8B0F.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+    op = col_A8B0F.operator('sna.dgs_render_advanced_render_147af', text='Render', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'camera.svg')), emboss=True, depress=False)
+    op = box_3D205.operator('sna.dgs_render_open_output_folder_82000', text='Open Output Folder', icon_value=0, emboss=True, depress=False)
+    op.sna_path = os.path.dirname(bpy.context.scene.render.filepath)
+    if (bpy.context.scene.camera == None):
+        box_3CB16 = box_3D205.box()
+        box_3CB16.alert = False
+        box_3CB16.enabled = True
+        box_3CB16.active = True
+        box_3CB16.use_property_split = False
+        box_3CB16.use_property_decorate = False
+        box_3CB16.alignment = 'Expand'.upper()
+        box_3CB16.scale_x = 1.0
+        box_3CB16.scale_y = 1.0
+        if not True: box_3CB16.operator_context = "EXEC_DEFAULT"
+        box_3CB16.label(text='No Active Camera found in Scene', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+    if (bpy.context.scene.render.filepath == ''):
+        box_A1F25 = box_3D205.box()
+        box_A1F25.alert = False
+        box_A1F25.enabled = True
+        box_A1F25.active = True
+        box_A1F25.use_property_split = False
+        box_A1F25.use_property_decorate = False
+        box_A1F25.alignment = 'Expand'.upper()
+        box_A1F25.scale_x = 1.0
+        box_A1F25.scale_y = 1.0
+        if not True: box_A1F25.operator_context = "EXEC_DEFAULT"
+        box_A1F25.label(text='Output path is empty', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+    if (bpy.context.scene.render.image_settings.media_type == 'IMAGE'):
+        pass
+    else:
+        box_7936D = box_3D205.box()
+        box_7936D.alert = False
+        box_7936D.enabled = True
+        box_7936D.active = True
+        box_7936D.use_property_split = False
+        box_7936D.use_property_decorate = False
+        box_7936D.alignment = 'Expand'.upper()
+        box_7936D.scale_x = 1.0
+        box_7936D.scale_y = 1.0
+        if not True: box_7936D.operator_context = "EXEC_DEFAULT"
+        box_7936D.label(text='Set the output Media Type to Image', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+    if (bpy.context.scene.sna_dgs_scene_properties.r2_color or bpy.context.scene.sna_dgs_scene_properties.r2_depth):
+        pass
+    else:
+        box_3B948 = box_3D205.box()
+        box_3B948.alert = False
+        box_3B948.enabled = True
+        box_3B948.active = True
+        box_3B948.use_property_split = False
+        box_3B948.use_property_decorate = False
+        box_3B948.alignment = 'Expand'.upper()
+        box_3B948.scale_x = 1.0
+        box_3B948.scale_y = 1.0
+        if not True: box_3B948.operator_context = "EXEC_DEFAULT"
+        box_3B948.label(text='No passes enabled', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
 
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
 
-    def execute(self, context):
-        if (bpy.context.scene.sna_dgs_scene_properties.r2_update_type == 'Single Time'):
-            pass
-        else:
-            bpy.context.scene.frame_current = bpy.context.scene.frame_start
-        if bpy.context and bpy.context.screen:
-            for a in bpy.context.screen.areas:
-                a.tag_redraw()
-        bpy.context.scene.sna_dgs_scene_properties.r2_interval_stop = (bpy.context.scene.sna_dgs_scene_properties.r2_update_type == 'Single Time')
-
-        def delayed_09B50():
-            for i_75739 in range(len(bpy.context.scene.objects)):
-                if (property_exists("bpy.context.scene.objects[i_75739].modifiers", globals(), locals()) and 'KIRI_3DGS_Render_GN' in bpy.context.scene.objects[i_75739].modifiers):
-                    bpy.context.scene.objects[i_75739].hide_viewport = False
-            sna_c2_refresh_all_4D367((not bpy.context.scene.sna_dgs_scene_properties.r2_selected), bpy.context.scene.sna_dgs_scene_properties.r2_transforms, True)
-            sna_shader_system_A4AED()
-            sna_texture_creation_FD1B2()
-            sna_viewport_render_A3941()
-            for i_07D59 in range(len(bpy.context.scene.objects)):
-                if ((property_exists("bpy.context.scene.objects[i_07D59].modifiers", globals(), locals()) and 'KIRI_3DGS_Render_GN' in bpy.context.scene.objects[i_07D59].modifiers) and '3DGS_Mesh_Type' in bpy.context.scene.objects[i_07D59]):
-                    if (bpy.context.scene.objects[i_07D59]['3DGS_Mesh_Type'] == 'face'):
-                        bpy.context.scene.objects[i_07D59].hide_viewport = True
-            if bpy.context.scene.sna_dgs_scene_properties.r2_interval_stop:
-                return None
-            return bpy.context.scene.sna_dgs_scene_properties.r2_interval
-        bpy.app.timers.register(delayed_09B50, first_interval=0.0)
-        for i_BD2F9 in range(len(bpy.context.scene.objects)):
-            if (property_exists("bpy.context.scene.objects[i_BD2F9].modifiers", globals(), locals()) and 'KIRI_3DGS_Render_GN' in bpy.context.scene.objects[i_BD2F9].modifiers):
-                bpy.context.scene.objects[i_BD2F9].hide_viewport = False
-        sna_c2_refresh_all_4D367((not bpy.context.scene.sna_dgs_scene_properties.r2_selected), bpy.context.scene.sna_dgs_scene_properties.r2_transforms, True)
-        sna_shader_system_A4AED()
-        sna_texture_creation_FD1B2()
-        sna_viewport_render_A3941()
-        for i_D854A in range(len(bpy.context.scene.objects)):
-            if ((property_exists("bpy.context.scene.objects[i_D854A].modifiers", globals(), locals()) and 'KIRI_3DGS_Render_GN' in bpy.context.scene.objects[i_D854A].modifiers) and '3DGS_Mesh_Type' in bpy.context.scene.objects[i_D854A]):
-                if (bpy.context.scene.objects[i_D854A]['3DGS_Mesh_Type'] == 'face'):
-                    bpy.context.scene.objects[i_D854A].hide_viewport = True
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
-
-
-class SNA_OT_Dgs_Render_Create_Proxy_From_Mesh_D5B41(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_create_proxy_from_mesh_d5b41"
-    bl_label = "3DGS Render: Create Proxy From Mesh"
-    bl_description = ""
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        sna_b2_load_from_blender_object_F0CCB(bpy.context.view_layer.objects.active.name + 'Splat_Proxy')
-        sna_shader_system_A4AED()
-        sna_texture_creation_FD1B2()
-        sna_viewport_render_A3941()
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
-
-
-class SNA_OT_Dgs_Render_Advanced_Render_Ba196(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_advanced_render_ba196"
+class SNA_OT_Dgs_Render_Advanced_Render_147Af(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_advanced_render_147af"
     bl_label = "3DGS Render: Advanced Render"
     bl_description = "Renders the proxy Gaussian objects with current settings"
     bl_options = {"REGISTER", "UNDO"}
@@ -7550,20 +10732,20 @@ class SNA_OT_Dgs_Render_Advanced_Render_Ba196(bpy.types.Operator):
         return not False
 
     def execute(self, context):
+        exec('import os')
         if bpy.context.scene.sna_dgs_scene_properties.r2_comp:
-            temp_render_path_0_c714f = sna_render_temp_scene_913CD(bpy.context.scene.sna_dgs_scene_properties.r2_animation, bpy.context.scene.frame_step)
-            bpy.context.scene.sna_dgs_scene_properties.r2_temp_path = temp_render_path_0_c714f
-        sna_render_comp_0DAEE(bpy.context.scene.sna_dgs_scene_properties.r2_animation, bpy.context.scene.sna_dgs_scene_properties.r2_color, bpy.context.scene.sna_dgs_scene_properties.r2_depth, bpy.context.scene.sna_dgs_scene_properties.r2_comp, bpy.context.scene.sna_dgs_scene_properties.r2_transforms, True, bpy.context.scene.frame_step, bpy.context.scene.sna_dgs_scene_properties.r2_temp_path)
+            temp_render_path_0_03f89 = sna_render_temp_scene_913CD(bpy.context.scene.sna_dgs_scene_properties.r2_animation, bpy.context.scene.frame_step)
+        sna_render_comp_0DAEE(bpy.context.scene.sna_dgs_scene_properties.r2_animation, bpy.context.scene.sna_dgs_scene_properties.r2_color, bpy.context.scene.sna_dgs_scene_properties.r2_depth, bpy.context.scene.sna_dgs_scene_properties.r2_comp, bpy.context.scene.sna_dgs_scene_properties.r2_transforms, True, bpy.context.scene.frame_step, bpy.context.scene.sna_dgs_scene_properties.r2_delete_temp_files, bpy.context.scene.sna_dgs_scene_properties.r2_render_rig_cache_mode, bpy.context.scene.sna_dgs_scene_properties.r2_sh_degree)
         return {"FINISHED"}
 
     def invoke(self, context, event):
         return self.execute(context)
 
 
-class SNA_OT_Dgs_Render_Clean_Up_Advanced_Render_Scene_09450(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_clean_up_advanced_render_scene_09450"
-    bl_label = "3DGS Render: Clean Up Advanced Render Scene"
-    bl_description = ""
+class SNA_OT_Dgs_Render_Refresh_Scene_A6719(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_refresh_scene_a6719"
+    bl_label = "3DGS Render: Refresh Scene"
+    bl_description = "Redraw any 3DGS proxy objects in the scene."
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -7573,15 +10755,31 @@ class SNA_OT_Dgs_Render_Clean_Up_Advanced_Render_Scene_09450(bpy.types.Operator)
         return not False
 
     def execute(self, context):
-        sna_clean_up_scene_5F1F1(bpy.context.scene.sna_dgs_scene_properties.r2_clear_empties)
+        exec('import os')
+        if (bpy.context.scene.sna_dgs_scene_properties.r2_update_type == 'Single'):
+            pass
+        else:
+            bpy.context.scene.frame_current = bpy.context.scene.frame_start
+        if bpy.context and bpy.context.screen:
+            for a in bpy.context.screen.areas:
+                a.tag_redraw()
+        bpy.context.scene.sna_dgs_scene_properties.r2_interval_stop = (bpy.context.scene.sna_dgs_scene_properties.r2_update_type == 'Single')
+
+        def delayed_06D54():
+            sna_r2_viewport_update_BA246()
+            if bpy.context.scene.sna_dgs_scene_properties.r2_interval_stop:
+                return None
+            return bpy.context.scene.sna_dgs_scene_properties.r2_interval
+        bpy.app.timers.register(delayed_06D54, first_interval=0.0)
+        sna_r2_viewport_update_BA246()
         return {"FINISHED"}
 
     def invoke(self, context, event):
         return self.execute(context)
 
 
-class SNA_OT_Dgs_Render_Stop_Interval_Updates_5Ac80(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_stop_interval_updates_5ac80"
+class SNA_OT_Dgs_Render_Stop_Interval_Updates_83370(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_stop_interval_updates_83370"
     bl_label = "3DGS Render: Stop Interval Updates"
     bl_description = ""
     bl_options = {"REGISTER", "UNDO"}
@@ -7598,6 +10796,174 @@ class SNA_OT_Dgs_Render_Stop_Interval_Updates_5Ac80(bpy.types.Operator):
 
     def invoke(self, context, event):
         return self.execute(context)
+
+
+def sna_r2_update_menu_6A492(layout_function, ):
+    box_EB86E = layout_function.box()
+    box_EB86E.alert = False
+    box_EB86E.enabled = True
+    box_EB86E.active = True
+    box_EB86E.use_property_split = False
+    box_EB86E.use_property_decorate = False
+    box_EB86E.alignment = 'Expand'.upper()
+    box_EB86E.scale_x = 1.0
+    box_EB86E.scale_y = 1.0
+    if not True: box_EB86E.operator_context = "EXEC_DEFAULT"
+    box_B1484 = box_EB86E.box()
+    box_B1484.alert = False
+    box_B1484.enabled = True
+    box_B1484.active = True
+    box_B1484.use_property_split = False
+    box_B1484.use_property_decorate = False
+    box_B1484.alignment = 'Expand'.upper()
+    box_B1484.scale_x = 1.0
+    box_B1484.scale_y = 1.0
+    if not True: box_B1484.operator_context = "EXEC_DEFAULT"
+    box_B1484.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_hide_on_change', text='Toggle visibility on menu change', icon_value=0, emboss=True)
+    box_B1484.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_transforms', text='Copy source transforms', icon_value=0, emboss=True)
+    box_B1484.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_selected', text='Update selected Proxy Empties only', icon_value=0, emboss=True)
+    row_7FB2A = box_B1484.row(heading='', align=False)
+    row_7FB2A.alert = False
+    row_7FB2A.enabled = True
+    row_7FB2A.active = True
+    row_7FB2A.use_property_split = False
+    row_7FB2A.use_property_decorate = False
+    row_7FB2A.scale_x = 1.0
+    row_7FB2A.scale_y = 1.0
+    row_7FB2A.alignment = 'Expand'.upper()
+    row_7FB2A.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+    row_7FB2A.label(text='Rig Behaviour', icon_value=0)
+    row_7FB2A.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_render_rig_cache_mode', text='', icon_value=0, emboss=True)
+    box_2F177 = box_EB86E.box()
+    box_2F177.alert = False
+    box_2F177.enabled = True
+    box_2F177.active = True
+    box_2F177.use_property_split = False
+    box_2F177.use_property_decorate = False
+    box_2F177.alignment = 'Expand'.upper()
+    box_2F177.scale_x = 1.0
+    box_2F177.scale_y = 1.0
+    if not True: box_2F177.operator_context = "EXEC_DEFAULT"
+    col_9BE62 = box_2F177.column(heading='', align=True)
+    col_9BE62.alert = False
+    col_9BE62.enabled = True
+    col_9BE62.active = True
+    col_9BE62.use_property_split = False
+    col_9BE62.use_property_decorate = False
+    col_9BE62.scale_x = 1.0
+    col_9BE62.scale_y = 1.0
+    col_9BE62.alignment = 'Expand'.upper()
+    col_9BE62.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+    col_9BE62.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_sh_degree', text='SH Degrees', icon_value=0, emboss=True, expand=True)
+    col_9BE62.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_sort_threshold', text='Camera Move Sort Threshold', icon_value=0, emboss=True, expand=True)
+    box_4B521 = box_EB86E.box()
+    box_4B521.alert = False
+    box_4B521.enabled = (not ((bpy.context.scene.sna_dgs_scene_properties.r2_update_type == 'Interval') and (not bpy.context.scene.sna_dgs_scene_properties.r2_interval_stop)))
+    box_4B521.active = True
+    box_4B521.use_property_split = False
+    box_4B521.use_property_decorate = False
+    box_4B521.alignment = 'Expand'.upper()
+    box_4B521.scale_x = 1.0
+    box_4B521.scale_y = 1.0
+    if not True: box_4B521.operator_context = "EXEC_DEFAULT"
+    col_2B0AE = box_4B521.column(heading='', align=True)
+    col_2B0AE.alert = False
+    col_2B0AE.enabled = True
+    col_2B0AE.active = True
+    col_2B0AE.use_property_split = False
+    col_2B0AE.use_property_decorate = False
+    col_2B0AE.scale_x = 1.0
+    col_2B0AE.scale_y = 1.0
+    col_2B0AE.alignment = 'Expand'.upper()
+    col_2B0AE.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+    row_09C1F = col_2B0AE.row(heading='', align=False)
+    row_09C1F.alert = False
+    row_09C1F.enabled = True
+    row_09C1F.active = True
+    row_09C1F.use_property_split = False
+    row_09C1F.use_property_decorate = False
+    row_09C1F.scale_x = 1.0
+    row_09C1F.scale_y = 1.0
+    row_09C1F.alignment = 'Expand'.upper()
+    row_09C1F.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+    row_09C1F.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_update_type', text=bpy.context.scene.sna_dgs_scene_properties.r2_update_type, icon_value=0, emboss=True, expand=True)
+    if (bpy.context.scene.sna_dgs_scene_properties.r2_update_type == 'Interval'):
+        col_2B0AE.prop(bpy.context.scene.sna_dgs_scene_properties, 'r2_interval', text='Interval Time (Seconds)', icon_value=0, emboss=True, expand=True)
+    col_A95B5 = col_2B0AE.column(heading='', align=False)
+    col_A95B5.alert = False
+    col_A95B5.enabled = True
+    col_A95B5.active = True
+    col_A95B5.use_property_split = False
+    col_A95B5.use_property_decorate = False
+    col_A95B5.scale_x = 1.0
+    col_A95B5.scale_y = 2.0
+    col_A95B5.alignment = 'Expand'.upper()
+    col_A95B5.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+    op = col_A95B5.operator('sna.dgs_render_refresh_scene_a6719', text='Update Scene', icon_value=(load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'play.svg')) if (bpy.context.scene.sna_dgs_scene_properties.r2_update_type == 'Interval') else load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'update.svg'))), emboss=True, depress=False)
+    if ((bpy.context.scene.sna_dgs_scene_properties.r2_update_type == 'Interval') and (not bpy.context.scene.sna_dgs_scene_properties.r2_interval_stop)):
+        col_9AB35 = box_EB86E.column(heading='', align=False)
+        col_9AB35.alert = True
+        col_9AB35.enabled = True
+        col_9AB35.active = True
+        col_9AB35.use_property_split = False
+        col_9AB35.use_property_decorate = False
+        col_9AB35.scale_x = 1.0
+        col_9AB35.scale_y = 2.0
+        col_9AB35.alignment = 'Expand'.upper()
+        col_9AB35.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+        op = col_9AB35.operator('sna.dgs_render_stop_interval_updates_83370', text='Stop', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'stop.svg')), emboss=True, depress=False)
+    if bpy.context.preferences.addons[__package__].preferences.sna_show_tips:
+        col_BE44B = box_EB86E.column(heading='', align=False)
+        col_BE44B.alert = False
+        col_BE44B.enabled = True
+        col_BE44B.active = True
+        col_BE44B.use_property_split = False
+        col_BE44B.use_property_decorate = False
+        col_BE44B.scale_x = 1.0
+        col_BE44B.scale_y = 1.0
+        col_BE44B.alignment = 'Expand'.upper()
+        col_BE44B.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+        if (bpy.context.scene.sna_dgs_scene_properties.r2_update_type == 'Interval'):
+            box_CCFB1 = col_BE44B.box()
+            box_CCFB1.alert = False
+            box_CCFB1.enabled = True
+            box_CCFB1.active = True
+            box_CCFB1.use_property_split = False
+            box_CCFB1.use_property_decorate = False
+            box_CCFB1.alignment = 'Expand'.upper()
+            box_CCFB1.scale_x = 1.0
+            box_CCFB1.scale_y = 1.0
+            if not True: box_CCFB1.operator_context = "EXEC_DEFAULT"
+            box_CCFB1.label(text='Interval Updates are intensive', icon_value=0)
+            box_CCFB1.label(text='Use it to preview single, small object animations', icon_value=0)
+            box_CCFB1.label(text='Use with caution, expect lagging', icon_value=0)
+        box_59076 = col_BE44B.box()
+        box_59076.alert = False
+        box_59076.enabled = True
+        box_59076.active = True
+        box_59076.use_property_split = False
+        box_59076.use_property_decorate = False
+        box_59076.alignment = 'Expand'.upper()
+        box_59076.scale_x = 1.0
+        box_59076.scale_y = 1.0
+        if not True: box_59076.operator_context = "EXEC_DEFAULT"
+        box_59076.label(text='If depth sorting fails', icon_value=0)
+        box_59076.label(text='Move the camera with Shift+Middle Mouse', icon_value=0)
+
+
+def sna_r2_viewport_update_BA246():
+    if bpy.context.scene.sna_dgs_scene_properties.r2_render_rig_cache_mode == "Enabled Baked":
+        sna_rig_5_apply_baked_cache_5656F('All Bound', None)
+        sna_clean_up_scene_5F1F1(False)
+        sna_shader_system_A4AED()
+        sna_texture_creation_FD1B2()
+        sna_viewport_render_A3941(bpy.context.scene.sna_dgs_scene_properties.r2_sh_degree, bpy.context.scene.sna_dgs_scene_properties.r2_sort_threshold)
+    else:
+        pass
+    sna_c2_refresh_all_4D367((not bpy.context.scene.sna_dgs_scene_properties.r2_selected), bpy.context.scene.sna_dgs_scene_properties.r2_transforms, True)
+    sna_shader_system_A4AED()
+    sna_texture_creation_FD1B2()
+    sna_viewport_render_A3941(bpy.context.scene.sna_dgs_scene_properties.r2_sh_degree, bpy.context.scene.sna_dgs_scene_properties.r2_sort_threshold)
 
 
 class SNA_OT_Dgs_Render_Auto_Generate_Crop_Object_F20D5(bpy.types.Operator):
@@ -8332,89 +11698,69 @@ class SNA_OT_Dgs_Render_Auto_Generate_Crop_Object_F20D5(bpy.types.Operator):
                 pass
             else:
                 input_object = filter_result_object
-                # Input Variables
-                #input_object = None  # bpy.types.Object - The object to select and make active
-                deselect_all_first = True  # bool - Whether to deselect all objects first
-                # Output Variables  
-                success = False  # bool - Whether the operation was successful
-                error_message = ""  # str - Error message if operation failed
+                # --- Input Variables (For testing or Serpens integration) ---
+                #input_object = bpy.context.object  # The target object
+                deselect_all_first = True          # Clear selection before starting?
+                make_active = True                 # NEW: Toggle between just selecting or selecting + activating
+                # --- Output Variables ---
+                success = False
+                error_message = ""
 
                 def safe_deselect_all():
-                    """
-                    Safely deselect all objects, only touching objects that are in the current view layer
-                    """
                     try:
-                        # Get current view layer
                         view_layer = bpy.context.view_layer
-                        # Only deselect objects that are actually in the current view layer
-                        for obj in bpy.context.selected_objects[:]:  # Create a copy of the list to avoid modification during iteration
-                            # Check if object is in current view layer
+                        for obj in bpy.context.selected_objects[:]:
                             if obj.name in view_layer.objects:
                                 obj.select_set(False)
-                        # Clear active object safely
-                        if view_layer.objects.active and view_layer.objects.active.name in view_layer.objects:
+                        # Only clear active if we actually want to reset everything
+                        if view_layer.objects.active:
                             view_layer.objects.active = None
                         return True, ""
                     except Exception as e:
-                        return False, f"Error during deselect all: {str(e)}"
+                        return False, f"Deselect error: {str(e)}"
 
-                def select_and_activate_object(obj):
-                    """
-                    Select and activate the given object, making it visible first if needed
-                    """
+                def select_object_logic(obj, should_activate):
                     if not obj:
                         return False, "No object provided"
                     try:
                         view_layer = bpy.context.view_layer
-                        # Check if object exists in current view layer
                         if obj.name not in view_layer.objects:
-                            return False, f"Object '{obj.name}' is not in the current view layer or is excluded"
-                        # Get the object from the view layer (this ensures we have the right reference)
-                        view_layer_obj = view_layer.objects[obj.name]
-                        # Make object visible if it's hidden
-                        visibility_changes = []
-                        # Unhide in viewport
+                            return False, f"Object '{obj.name}' not in current view layer"
+                        # 1. Unhide Object
                         if obj.hide_viewport:
                             obj.hide_viewport = False
-                            visibility_changes.append("viewport")
-                        # Unhide in view layer
+                        view_layer_obj = view_layer.objects[obj.name]
                         if view_layer_obj.hide_get():
                             view_layer_obj.hide_set(False)
-                            visibility_changes.append("view layer")
-                        # Try to unhide parent collections if they're hidden
-                        for collection in obj.users_collection:
-                            if collection.hide_viewport:
-                                collection.hide_viewport = False
-                                visibility_changes.append(f"collection '{collection.name}'")
-                        # Select the object
+                        # 2. Unhide Direct Parent Collections
+                        for col in obj.users_collection:
+                            if col.hide_viewport:
+                                col.hide_viewport = False
+                        # 3. Select 
                         view_layer_obj.select_set(True)
-                        # Make it active
-                        view_layer.objects.active = view_layer_obj
-                        success_msg = f"Successfully selected and activated '{obj.name}'"
-                        if visibility_changes:
-                            success_msg += f" (made visible in: {', '.join(visibility_changes)})"
-                        return True, success_msg
-                    except Exception as e:
-                        return False, f"Error selecting object '{obj.name}': {str(e)}"
-                # Main execution
-                if input_object:
-                    # Deselect all first if requested
-                    if deselect_all_first:
-                        deselect_success, deselect_error = safe_deselect_all()
-                        if not deselect_success:
-                            success = False
-                            error_message = deselect_error
-                            print(error_message)
+                        # 4. Conditionally Activate
+                        if should_activate:
+                            view_layer.objects.active = view_layer_obj
+                            msg = f"Selected and activated {obj.name}"
                         else:
-                            print("All objects deselected safely")
-                    # Select and activate the input object (only if deselect was successful or not requested)
-                    if not deselect_all_first or deselect_success:
-                        success, error_message = select_and_activate_object(input_object)
-                        print(error_message)
+                            msg = f"Selected {obj.name} (Active object remains {view_layer.objects.active})"
+                        return True, msg
+                    except Exception as e:
+                        return False, f"Selection error: {str(e)}"
+                # --- Execution Logic ---
+                # 1. Handle Deselection
+                if deselect_all_first:
+                    success, error_message = safe_deselect_all()
                 else:
-                    success = False
-                    error_message = "No input object provided"
-                    print(error_message)
+                    success = True # Skip deselect, proceed to selection
+                # 2. Handle Selection
+                if success:
+                    if input_object:
+                        success, error_message = select_object_logic(input_object, make_active)
+                    else:
+                        success = False
+                        error_message = "No input object provided"
+                print(f"Result -> Success: {success}, Message: {error_message}")
                 bpy.context.view_layer.objects.active.name = 'AutoCrop_' + bpy.context.view_layer.objects.active.name
                 bpy.context.view_layer.objects.active.hide_render = True
                 if self.sna_create_convex_hull_object:
@@ -8448,7 +11794,7 @@ class SNA_OT_Dgs_Render_Auto_Generate_Crop_Object_F20D5(bpy.types.Operator):
         box_E9B63.scale_x = 1.0
         box_E9B63.scale_y = 1.0
         if not True: box_E9B63.operator_context = "EXEC_DEFAULT"
-        box_E9B63.label(text="There is no 'one size fits all' setting.", icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
+        box_E9B63.label(text="There is no 'one size fits all' setting.", icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
         box_E9B63.label(text='You may need to play with different values.', icon_value=0)
         box_AC64A = col_AFE45.box()
         box_AC64A.alert = False
@@ -8541,7 +11887,7 @@ def sna_import_menu_94FB1(layout_function, ):
         box_0AF9B.scale_y = 1.0
         if not True: box_0AF9B.operator_context = "EXEC_DEFAULT"
         op = box_0AF9B.operator('sna.dgs_render_rotate_for_blender_axes_423de', text='Rotate Active To Blender Axes', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'refresh.svg')), emboss=True, depress=False)
-    if bpy.context.scene.sna_dgs_scene_properties.show_tips:
+    if bpy.context.preferences.addons[__package__].preferences.sna_show_tips:
         col_9F76F = col_E3544.column(heading='', align=False)
         col_9F76F.alert = False
         col_9F76F.enabled = True
@@ -8562,10 +11908,9 @@ def sna_import_menu_94FB1(layout_function, ):
         box_599AC.scale_x = 1.0
         box_599AC.scale_y = 1.0
         if not True: box_599AC.operator_context = "EXEC_DEFAULT"
-        box_599AC.label(text='Do not apply rotation or scale', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
+        box_599AC.label(text='Do not apply rotation or scale', icon_value=0)
         box_599AC.label(text="using Blender's native Apply Transforms", icon_value=0)
         box_599AC.label(text="Use the addon's Apply 3DGS Transforms", icon_value=0)
-        box_599AC.label(text='Higher SH bands will not be updated', icon_value=0)
         box_37F67 = col_9F76F.box()
         box_37F67.alert = False
         box_37F67.enabled = True
@@ -8576,24 +11921,9 @@ def sna_import_menu_94FB1(layout_function, ):
         box_37F67.scale_x = 1.0
         box_37F67.scale_y = 1.0
         if not True: box_37F67.operator_context = "EXEC_DEFAULT"
-        box_37F67.label(text='For performance and similarity to', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
-        box_37F67.label(text='Render mode results, import as Verts', icon_value=0)
-        box_37F67.label(text='For Vertex Painting, and fine ', icon_value=0)
-        box_37F67.label(text='manual editing, import as Faces.', icon_value=0)
-        box_32768 = col_9F76F.box()
-        box_32768.alert = False
-        box_32768.enabled = True
-        box_32768.active = True
-        box_32768.use_property_split = False
-        box_32768.use_property_decorate = False
-        box_32768.alignment = 'Expand'.upper()
-        box_32768.scale_x = 1.0
-        box_32768.scale_y = 1.0
-        if not True: box_32768.operator_context = "EXEC_DEFAULT"
-        box_32768.label(text='Face imported objects will be', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
-        box_32768.label(text="'Disabled In Viewport' in Render mode", icon_value=0)
-        box_32768.label(text='If your objects disappears. Check viewport', icon_value=0)
-        box_32768.label(text='disable settings in the outliner', icon_value=0)
+        box_37F67.label(text='Verts = performance, rigging and ', icon_value=0)
+        box_37F67.label(text='visual parity with Render mode results', icon_value=0)
+        box_37F67.label(text='Faces = Vertex Painting and fine edits', icon_value=0)
         if (bpy.context.scene.render.engine != 'BLENDER_EEVEE_NEXT'):
             box_3BEA2 = col_9F76F.box()
             box_3BEA2.alert = False
@@ -8605,9 +11935,7 @@ def sna_import_menu_94FB1(layout_function, ):
             box_3BEA2.scale_x = 1.0
             box_3BEA2.scale_y = 1.0
             if not True: box_3BEA2.operator_context = "EXEC_DEFAULT"
-            box_3BEA2.label(text='For best results use Eevee', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
-            box_3BEA2.label(text='Cycles can be used with high', icon_value=0)
-            box_3BEA2.label(text='transparent bounces', icon_value=0)
+            box_3BEA2.label(text='Eevee is recommended', icon_value=0)
 
 
 class SNA_OT_Dgs_Render_Rotate_For_Blender_Axes_423De(bpy.types.Operator):
@@ -8836,9 +12164,7 @@ class SNA_OT_Dgs_Render_Import_Ply_E0A3A(bpy.types.Operator, ImportHelper):
         # You can access 'attributes_missing' (boolean), 'message' (string), and 'output_object' (bpy.types.Object or None) in other scripts or logic
         if (bpy.context.scene.sna_dgs_scene_properties.import_face_vert == 'Faces'):
             bpy.context.view_layer.objects.active['3DGS_Mesh_Type'] = 'face'
-            sna_append_and_add_geo_nodes_function_execute_6BCD7('KIRI_3DGS_Store_Origpos_GN', 'KIRI_3DGS_Store_Origpos_GN', bpy.context.view_layer.objects.active)
-            bpy.ops.object.modifier_apply('INVOKE_DEFAULT', modifier='KIRI_3DGS_Store_Origpos_GN')
-            sna_append_and_add_geo_nodes_function_execute_6BCD7('KIRI_3DGS_Render_GN', 'KIRI_3DGS_Render_GN', bpy.context.view_layer.objects.active)
+            sna_append_and_add_geo_nodes_function_execute_6BCD7('KIRI_3DGS_Render_To_Faces_GN', 'KIRI_3DGS_Render_GN', bpy.context.view_layer.objects.active)
             sna_align_active_values_to_x_4CE1F()
             bpy.ops.object.modifier_apply('INVOKE_DEFAULT', modifier='KIRI_3DGS_Render_GN')
         else:
@@ -8933,7 +12259,7 @@ class SNA_OT_Dgs_Render_Import_Ply_E0A3A(bpy.types.Operator, ImportHelper):
             pass
         else:
             before_data = list(bpy.data.materials)
-            bpy.ops.wm.append(directory=os.path.join(os.path.dirname(__file__), 'assets', '3DGS Render APPEND V4.blend') + r'\Material', filename='KIRI_3DGS_Render_Material', link=False)
+            bpy.ops.wm.append(directory=os.path.join(os.path.dirname(__file__), 'assets', '3DGS Render APPEND V5.blend') + r'\Material', filename='KIRI_3DGS_Render_Material', link=False)
             new_data = list(filter(lambda d: not d in before_data, list(bpy.data.materials)))
             appended_C1470 = None if not new_data else new_data[0]
         bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Sorter_GN'].show_viewport = (bpy.data.materials['KIRI_3DGS_Render_Material'].surface_render_method == 'BLENDED')
@@ -8987,7 +12313,7 @@ def sna_append_and_add_geo_nodes_function_execute_6BCD7(Node_Group_Name, Modifie
         pass
     else:
         before_data = list(bpy.data.node_groups)
-        bpy.ops.wm.append(directory=os.path.join(os.path.dirname(__file__), 'assets', '3DGS Render APPEND V4.blend') + r'\NodeTree', filename=Node_Group_Name, link=False)
+        bpy.ops.wm.append(directory=os.path.join(os.path.dirname(__file__), 'assets', '3DGS Render APPEND V5.blend') + r'\NodeTree', filename=Node_Group_Name, link=False)
         new_data = list(filter(lambda d: not d in before_data, list(bpy.data.node_groups)))
         appended_65345 = None if not new_data else new_data[0]
     modifier_6D624 = Object.modifiers.new(name=Modifier_Name, type='NODES', )
@@ -8995,9 +12321,9 @@ def sna_append_and_add_geo_nodes_function_execute_6BCD7(Node_Group_Name, Modifie
     return modifier_6D624
 
 
-class SNA_PT_DGS_RENDER_BY_KIRI_ENGINE_A02CB(bpy.types.Panel):
+class SNA_PT_DGS_RENDER_BY_KIRI_ENGINE_E1A83(bpy.types.Panel):
     bl_label = '3DGS Render by KIRI Engine'
-    bl_idname = 'SNA_PT_DGS_RENDER_BY_KIRI_ENGINE_A02CB'
+    bl_idname = 'SNA_PT_DGS_RENDER_BY_KIRI_ENGINE_E1A83'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_context = ''
@@ -9021,7 +12347,4870 @@ class SNA_PT_DGS_RENDER_BY_KIRI_ENGINE_A02CB(bpy.types.Panel):
         sna_about_kiri_links_docs_3dgs_D02EC(layout_function, )
 
 
+class SNA_OT_Dgs_Render_Apply_Modifier_0F5F2(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_apply_modifier_0f5f2"
+    bl_label = "3DGS Render: Apply Modifier"
+    bl_description = "Applies the named modifier"
+    bl_options = {"REGISTER", "UNDO"}
+    sna_target_object: bpy.props.StringProperty(name='Target Object', description='', options={'HIDDEN'}, default='', subtype='NONE', maxlen=0)
+    sna_target_modifier: bpy.props.StringProperty(name='Target Modifier', description='', options={'HIDDEN'}, default='', subtype='NONE', maxlen=0)
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        object_name = self.sna_target_object
+        modifier_name = self.sna_target_modifier
+        #import bpy
+        # --- VARIABLES ---
+        # Replace these with your Serpens inputs or variables
+        #object_name = "Cube"      # The name of the object you want to affect
+        #modifier_name = "Bevel"   # The name of the modifier to apply/remove
+        # --- SCRIPT START ---
+        obj = bpy.data.objects.get(object_name)
+        if obj:
+            modifier = obj.modifiers.get(modifier_name)
+            if modifier:
+                if not modifier.show_viewport:
+                    # Case 1: Modifier is hidden in viewport -> Remove it directly
+                    # This works because .remove() is a data operation, not an operator.
+                    obj.modifiers.remove(modifier)
+                    print(f"Removed hidden modifier '{modifier_name}' from '{object_name}'.")
+                else:
+                    # Case 2: Modifier is visible -> Apply it using an Operator
+                    # CONTEXT OVERRIDE EXPLANATION:
+                    # bpy.ops usually runs on whatever is selected in the 3D View.
+                    # 'temp_override' creates a temporary, isolated environment where 
+                    # Blender believes 'obj' is the Active Object, regardless of what 
+                    # you actually have selected. 
+                    try:
+                        # We force the 'object' and 'active_object' context members to be our specific obj
+                        with bpy.context.temp_override(object=obj, active_object=obj):
+                            # Inside this block, the operator thinks 'obj' is the active selection
+                            bpy.ops.object.modifier_apply(modifier=modifier_name)
+                        print(f"Applied visible modifier '{modifier_name}' to '{object_name}'.")
+                    except Exception as e:
+                        print(f"Could not apply modifier. Error: {e}")
+            else:
+                print(f"Modifier '{modifier_name}' not found on object '{object_name}'.")
+        else:
+            print(f"Object '{object_name}' not found.")
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+class SNA_OT_Dgs_Render_Remove_Modifier_9Cf0D(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_remove_modifier_9cf0d"
+    bl_label = "3DGS Render: Remove Modifier"
+    bl_description = "Applies the named modifier"
+    bl_options = {"REGISTER", "UNDO"}
+    sna_target_object: bpy.props.StringProperty(name='Target Object', description='', options={'HIDDEN'}, default='', subtype='NONE', maxlen=0)
+    sna_target_modifier: bpy.props.StringProperty(name='Target Modifier', description='', options={'HIDDEN'}, default='', subtype='NONE', maxlen=0)
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        bpy.data.objects[self.sna_target_object].modifiers.remove(modifier=bpy.data.objects[self.sna_target_object].modifiers[self.sna_target_modifier], )
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+def sna_duplicate_object_ED1F0(source_obj_name):
+    source_obj_name = source_obj_name
+    new_object_name = None
+    # Input variables
+    #source_obj_name = "Cube"  # Change this to your object's name
+    offset_x = 0.0  # Input float variable for X offset
+    # Get the source object
+    source_obj = bpy.data.objects.get(source_obj_name)
+    # Check if the object exists
+    if source_obj:
+        # Create a copy of the object
+        new_obj = source_obj.copy()
+        new_obj.data = source_obj.data.copy()
+        # Link the new object to the scene
+        bpy.context.scene.collection.objects.link(new_obj)
+        # Apply the offset if any
+        new_obj.location.x += offset_x
+        # Clear current selection
+        bpy.ops.object.select_all(action='DESELECT')
+        # Select and activate the new object
+        new_obj.select_set(True)
+        bpy.context.view_layer.objects.active = new_obj
+        # Store the new object's name in a variable
+        new_object_name = new_obj.name
+        # Output the new object for Serpens (return the actual object)
+        output_object = new_obj
+    else:
+        new_object_name = "ERROR: Source object not found"
+        output_object = None
+    # Output the new object's name (this will be captured by Serpens)
+    print(new_object_name)
+    return new_object_name
+
+
+def sna_move_modifier_index_23126(object, modifier_to_move, to_index):
+    for i_64655 in range(len(object.modifiers)):
+        if (object.modifiers[i_64655] == object.modifiers[modifier_to_move]):
+            bpy.context.view_layer.objects.active.modifiers.move(from_index=i_64655, to_index=to_index, )
+            bpy.context.view_layer.objects.active.update_tag(refresh={'DATA'}, )
+            if bpy.context and bpy.context.screen:
+                for a in bpy.context.screen.areas:
+                    a.tag_redraw()
+
+
+class SNA_OT_Dgs_Render_Select_Object_B1F49(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_select_object_b1f49"
+    bl_label = "3DGS Render: Select Object"
+    bl_description = "Select a specific object"
+    bl_options = {"REGISTER", "UNDO"}
+    sna_object_name: bpy.props.StringProperty(name='Object name', description='', options={'HIDDEN'}, default='', subtype='NONE', maxlen=0)
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        input_object = bpy.data.objects[self.sna_object_name]
+        # --- Input Variables (For testing or Serpens integration) ---
+        #input_object = bpy.context.object  # The target object
+        deselect_all_first = True          # Clear selection before starting?
+        make_active = True                 # NEW: Toggle between just selecting or selecting + activating
+        # --- Output Variables ---
+        success = False
+        error_message = ""
+
+        def safe_deselect_all():
+            try:
+                view_layer = bpy.context.view_layer
+                for obj in bpy.context.selected_objects[:]:
+                    if obj.name in view_layer.objects:
+                        obj.select_set(False)
+                # Only clear active if we actually want to reset everything
+                if view_layer.objects.active:
+                    view_layer.objects.active = None
+                return True, ""
+            except Exception as e:
+                return False, f"Deselect error: {str(e)}"
+
+        def select_object_logic(obj, should_activate):
+            if not obj:
+                return False, "No object provided"
+            try:
+                view_layer = bpy.context.view_layer
+                if obj.name not in view_layer.objects:
+                    return False, f"Object '{obj.name}' not in current view layer"
+                # 1. Unhide Object
+                if obj.hide_viewport:
+                    obj.hide_viewport = False
+                view_layer_obj = view_layer.objects[obj.name]
+                if view_layer_obj.hide_get():
+                    view_layer_obj.hide_set(False)
+                # 2. Unhide Direct Parent Collections
+                for col in obj.users_collection:
+                    if col.hide_viewport:
+                        col.hide_viewport = False
+                # 3. Select 
+                view_layer_obj.select_set(True)
+                # 4. Conditionally Activate
+                if should_activate:
+                    view_layer.objects.active = view_layer_obj
+                    msg = f"Selected and activated {obj.name}"
+                else:
+                    msg = f"Selected {obj.name} (Active object remains {view_layer.objects.active})"
+                return True, msg
+            except Exception as e:
+                return False, f"Selection error: {str(e)}"
+        # --- Execution Logic ---
+        # 1. Handle Deselection
+        if deselect_all_first:
+            success, error_message = safe_deselect_all()
+        else:
+            success = True # Skip deselect, proceed to selection
+        # 2. Handle Selection
+        if success:
+            if input_object:
+                success, error_message = select_object_logic(input_object, make_active)
+            else:
+                success = False
+                error_message = "No input object provided"
+        print(f"Result -> Success: {success}, Message: {error_message}")
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+class SNA_OT_Dgs_Render_Open_Output_Folder_82000(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_open_output_folder_82000"
+    bl_label = "3DGS Render: Open Output Folder"
+    bl_description = "Open a file directory"
+    bl_options = {"REGISTER", "UNDO"}
+    sna_path: bpy.props.StringProperty(name='path', description='', options={'HIDDEN'}, default='', subtype='NONE', maxlen=0)
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        folder_path = self.sna_path
+        # Open Folder Script for Serpens
+        # This script opens a folder from a given path, compatible with all operating systems
+        # Input variables
+        #folder_path = # String: path to folder to open
+        # Default: ""
+        # Description: Full path to the folder you want to open
+        # Output variables
+        #success = # Boolean: whether the folder was opened successfully
+        #error_message = # String: error message if any
+        # Import necessary modules
+        import platform
+        # Initialize output variables
+        success = False
+        error_message = ""
+        # Check if the folder path is provided and exists
+        if not folder_path:
+            error_message = "No folder path provided"
+        else:
+            # Normalize path for OS consistency
+            folder_path = os.path.normpath(folder_path)
+            # Check if path exists
+            if not os.path.exists(folder_path):
+                error_message = f"Path does not exist: {folder_path}"
+            elif not os.path.isdir(folder_path):
+                error_message = f"Path is not a directory: {folder_path}"
+            else:
+                # Determine which OS we're on and use the appropriate command to open the folder
+                try:
+                    system = platform.system()
+                    if system == "Windows":
+                        # Windows - use explorer
+                        subprocess.Popen(["explorer", folder_path])
+                        success = True
+                    elif system == "Darwin":
+                        # macOS - use open command
+                        subprocess.Popen(["open", folder_path])
+                        success = True
+                    elif system == "Linux":
+                        # Linux - try xdg-open first (most common)
+                        try:
+                            subprocess.Popen(["xdg-open", folder_path])
+                            success = True
+                        except FileNotFoundError:
+                            # If xdg-open isn't available, try a few alternatives
+                            try:
+                                subprocess.Popen(["nautilus", folder_path])
+                                success = True
+                            except FileNotFoundError:
+                                try:
+                                    subprocess.Popen(["dolphin", folder_path])
+                                    success = True
+                                except FileNotFoundError:
+                                    try:
+                                        subprocess.Popen(["thunar", folder_path])
+                                        success = True
+                                    except FileNotFoundError:
+                                        error_message = "Unable to find a file manager on your Linux system"
+                    else:
+                        error_message = f"Unsupported operating system: {system}"
+                except Exception as e:
+                    error_message = f"Error opening folder: {str(e)}"
+        # Print status for debugging (can be removed in production)
+        if success:
+            print(f"Successfully opened folder: {folder_path}")
+        else:
+            print(f"Failed to open folder: {error_message}")
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+def sna_edit_select_tools_D0175(layout_function, ):
+    box_DC33F = layout_function.box()
+    box_DC33F.alert = False
+    box_DC33F.enabled = True
+    box_DC33F.active = True
+    box_DC33F.use_property_split = False
+    box_DC33F.use_property_decorate = False
+    box_DC33F.alignment = 'Expand'.upper()
+    box_DC33F.scale_x = 1.0
+    box_DC33F.scale_y = 1.0
+    if not True: box_DC33F.operator_context = "EXEC_DEFAULT"
+    box_DC33F.label(text='Select Tools', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')))
+    box_243AA = box_DC33F.box()
+    box_243AA.alert = False
+    box_243AA.enabled = True
+    box_243AA.active = True
+    box_243AA.use_property_split = False
+    box_243AA.use_property_decorate = False
+    box_243AA.alignment = 'Expand'.upper()
+    box_243AA.scale_x = 1.0
+    box_243AA.scale_y = 1.0
+    if not True: box_243AA.operator_context = "EXEC_DEFAULT"
+    box_243AA.label(text='Select by Object', icon_value=0)
+    layout_function = box_243AA
+    sna_append_wire_primitives_15D73(layout_function, )
+    box_243AA.prop(bpy.context.scene.sna_dgs_scene_properties, 'select_select_by_obj', text='', icon_value=0, emboss=True)
+    row_187F8 = box_243AA.row(heading='', align=False)
+    row_187F8.alert = False
+    row_187F8.enabled = True
+    row_187F8.active = True
+    row_187F8.use_property_split = False
+    row_187F8.use_property_decorate = False
+    row_187F8.scale_x = 1.0
+    row_187F8.scale_y = 1.0
+    row_187F8.alignment = 'Expand'.upper()
+    row_187F8.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+    row_187F8.prop(bpy.context.scene.sna_dgs_scene_properties, 'select_obj_select_mode', text=bpy.context.scene.sna_dgs_scene_properties.select_obj_select_mode, icon_value=0, emboss=True, expand=True)
+    op = box_243AA.operator('sna.dgs_render_select_by_object_92f9c', text='Select', icon_value=0, emboss=True, depress=False)
+    box_2DF89 = box_DC33F.box()
+    box_2DF89.alert = False
+    box_2DF89.enabled = True
+    box_2DF89.active = True
+    box_2DF89.use_property_split = False
+    box_2DF89.use_property_decorate = False
+    box_2DF89.alignment = 'Expand'.upper()
+    box_2DF89.scale_x = 1.0
+    box_2DF89.scale_y = 1.0
+    if not True: box_2DF89.operator_context = "EXEC_DEFAULT"
+    box_2DF89.label(text='Select by attribute', icon_value=0)
+    box_2DF89.prop(bpy.context.scene.sna_dgs_scene_properties, 'select_attribute_type', text=bpy.context.scene.sna_dgs_scene_properties.select_attribute_type, icon_value=0, emboss=True, expand=True)
+    op = box_2DF89.operator('sna.dgs_render_attribute_select_51c86', text='Select', icon_value=0, emboss=True, depress=False)
+    op.sna_scale_target_attr = 'scale_combined'
+    op.sna_scale_factor = 0.8999999761581421
+    op.sna_scale_compare = 'GREATER'
+    op.sna_rot_target_euler = (0.0, 0.0, 0.0)
+    op.sna_rot_tolerance_deg = 5.0
+    op.sna_rot_compare = 'EQUAL'
+
+
+class SNA_OT_Dgs_Render_Attribute_Select_51C86(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_attribute_select_51c86"
+    bl_label = "3DGS Render: Attribute Select"
+    bl_description = "Select points based on native 3DGS attributes"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def sna_scale_target_attr_enum_items(self, context):
+        return [("No Items", "No Items", "No generate enum items node found to create items!", "ERROR", 0)]
+    sna_scale_target_attr: bpy.props.EnumProperty(name='SCALE_TARGET_ATTR', description='', items=[('scale_combined', 'scale_combined', '', 0, 0), ('scale_0', 'scale_0', '', 0, 1), ('scale_1', 'scale_1', '', 0, 2), ('scale_2', 'scale_2', '', 0, 3)])
+    sna_scale_factor: bpy.props.FloatProperty(name='SCALE_FACTOR', description='', default=0.5, subtype='NONE', unit='NONE', min=0.0, max=1.0, step=3, precision=2)
+
+    def sna_scale_compare_enum_items(self, context):
+        return [("No Items", "No Items", "No generate enum items node found to create items!", "ERROR", 0)]
+    sna_scale_compare: bpy.props.EnumProperty(name='SCALE_COMPARE', description='', items=[('GREATER', 'GREATER', '', 0, 0), ('LESS', 'LESS', '', 0, 1)])
+    sna_rot_target_euler: bpy.props.FloatVectorProperty(name='ROT_TARGET_EULER', description='', size=3, default=(0.0, 0.0, 0.0), subtype='EULER', unit='NONE', step=3, precision=6)
+    sna_rot_tolerance_deg: bpy.props.FloatProperty(name='ROT_TOLERANCE_DEG', description='', default=5.0, subtype='NONE', unit='NONE', min=0.0, step=3, precision=2)
+
+    def sna_rot_compare_enum_items(self, context):
+        return [("No Items", "No Items", "No generate enum items node found to create items!", "ERROR", 0)]
+    sna_rot_compare: bpy.props.EnumProperty(name='ROT_COMPARE', description='', items=[('EQUAL', 'EQUAL', '', 0, 0), ('NOT_EQUAL', 'NOT_EQUAL', '', 0, 1)])
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        TARGET_OBJ = bpy.context.view_layer.objects.active
+        SELECTION_MODE = bpy.context.scene.sna_dgs_scene_properties.select_attribute_type
+        SCALE_TARGET_ATTR = self.sna_scale_target_attr
+        SCALE_FACTOR = self.sna_scale_factor
+        SCALE_COMPARE = self.sna_scale_compare
+        ROT_TARGET_EULER = self.sna_rot_target_euler
+        ROT_TOLERANCE_DEG = self.sna_rot_tolerance_deg
+        ROT_COMPARE = self.sna_rot_compare
+        COL_TARGET_RGB = None
+        COL_COMPARE_MODE = None
+        COL_TOLERANCE = None
+        STRETCH_FACTOR = self.sna_scale_factor
+        STRETCH_COMPARE = self.sna_scale_compare
+        CLEAR_PREVIOUS = True
+        import bmesh
+        import mathutils
+        # =========================================================================
+        # INPUT VARIABLES (Serpens Sockets)
+        # =========================================================================
+        # TARGET_OBJ = None                  # Input: Pointer property / Object
+        # CLEAR_PREVIOUS = True              # Input: Boolean
+        # SELECTION_MODE = 'SCALE'           # Input: 'SCALE', 'ROT', or 'STRETCH'
+        # --- SCALE SETTINGS ---
+        # SCALE_TARGET_ATTR = 'scale_0'      # Input: 'scale_0', 'scale_1', 'scale_2', or 'scale_combined'
+        # SCALE_FACTOR = 0.5                 # Input: Float 0.0 to 1.0
+        # SCALE_COMPARE = 'GREATER'          # Input: 'GREATER' or 'LESS'
+        # --- STRETCH SETTINGS ---
+        # STRETCH_FACTOR = 0.5               # Input: Float 0.0 to 1.0 (0 = least stretched, 1 = most stretched)
+        # STRETCH_COMPARE = 'GREATER'        # Input: 'GREATER' or 'LESS'
+        # --- ROTATION SETTINGS ---
+        # ROT_TARGET_EULER = (0.0, 0.0, 0.0) # Input: Vector/Tuple in degrees
+        # ROT_TOLERANCE_DEG = 5.0            # Input: Float (Degrees of leeway)
+        # ROT_COMPARE = 'EQUAL'              # Input: 'EQUAL' or 'NOT_EQUAL'
+        # =========================================================================
+        # OUTPUT VARIABLES
+        # =========================================================================
+        SCRIPT_SUCCESS = False
+        SELECTED_COUNT = 0
+        ERROR_MSG = ""
+        # =========================================================================
+        # FIREWALL FUNCTIONS (Strips Serpens Wrappers/Lists/Strings into Floats)
+        # =========================================================================
+
+        def parse_float(val, default=0.0):
+            try:
+                if isinstance(val, (int, float)): return float(val)
+                if isinstance(val, (list, tuple)) and len(val) > 0: return float(val)
+                nums = [float(x) for x in re.findall(r"[-+]?(?:\d*\.\d+|\d+)", str(val))]
+                return nums if nums else float(default)
+            except:
+                return float(default)
+
+        def parse_vec3(val, default=(0.0, 0.0, 0.0)):
+            try:
+                if isinstance(val, (list, tuple)) and len(val) >= 3:
+                    return float(val), float(val[1]), float(val[2])
+                nums = [float(x) for x in re.findall(r"[-+]?(?:\d*\.\d+|\d+)", str(val))]
+                if len(nums) >= 3:
+                    return nums, nums[1], nums[2]
+                return default
+            except:
+                return default
+        # =========================================================================
+        # EXECUTION LOGIC 
+        # =========================================================================
+        try:
+            if TARGET_OBJ and TARGET_OBJ.type == 'MESH':
+                mesh = TARGET_OBJ.data
+                attrs = mesh.attributes
+                original_mode = 'OBJECT'
+                if bpy.context.active_object:
+                    original_mode = bpy.context.active_object.mode
+                if bpy.context.mode != 'OBJECT':
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                vert_selections = [False] * len(mesh.vertices)
+                # 1. Sanitize all inputs through the firewall immediately
+                safe_scale_factor = parse_float(SCALE_FACTOR, 0.5)
+                safe_stretch_factor = parse_float(STRETCH_FACTOR, 0.5)
+                safe_rot_tol = parse_float(ROT_TOLERANCE_DEG, 5.0)
+                target_rx, target_ry, target_rz = parse_vec3(ROT_TARGET_EULER, (0.0, 0.0, 0.0))
+                # -------------------------------------------------------------
+                # SCALE SELECTION
+                # -------------------------------------------------------------
+                if SELECTION_MODE == 'SCALE':
+                    if SCALE_TARGET_ATTR == 'scale_combined':
+                        required_scales = ['scale_0', 'scale_1', 'scale_2']
+                        if not all(a in attrs for a in required_scales):
+                            raise ValueError("Missing one or more scale attributes.")
+                        s0, s1, s2 = [attrs[a].data for a in required_scales]
+                        raw_scales = [(float(s0[i].value) + float(s1[i].value) + float(s2[i].value)) for i in range(len(mesh.vertices))]
+                    else:
+                        if SCALE_TARGET_ATTR not in attrs:
+                            raise ValueError(f"Attribute {SCALE_TARGET_ATTR} not found.")
+                        s_data = attrs[SCALE_TARGET_ATTR].data
+                        raw_scales = [float(item.value) for item in s_data]
+                    min_s = min(raw_scales)
+                    max_s = max(raw_scales)
+                    range_s = max_s - min_s if max_s != min_s else 1.0
+                    for i, val in enumerate(raw_scales):
+                        normalized_factor = (val - min_s) / range_s
+                        if SCALE_COMPARE == 'GREATER' and normalized_factor > safe_scale_factor:
+                            vert_selections[i] = True
+                        elif SCALE_COMPARE == 'LESS' and normalized_factor < safe_scale_factor:
+                            vert_selections[i] = True
+                # -------------------------------------------------------------
+                # STRETCH SELECTION
+                # -------------------------------------------------------------
+                elif SELECTION_MODE == 'STRETCH':
+                    required_scales = ['scale_0', 'scale_1', 'scale_2']
+                    if not all(a in attrs for a in required_scales):
+                        raise ValueError("Missing scale attributes for stretch mode.")
+                    s0, s1, s2 = [attrs[a].data for a in required_scales]
+                    raw_ratios = []
+                    for i in range(len(mesh.vertices)):
+                        v0, v1, v2 = float(s0[i].value), float(s1[i].value), float(s2[i].value)
+                        ratio = math.exp(max(v0, v1, v2) - min(v0, v1, v2))
+                        raw_ratios.append(ratio)
+                    min_r = min(raw_ratios)
+                    max_r = max(raw_ratios)
+                    range_r = max_r - min_r if max_r != min_r else 1.0
+                    for i, ratio in enumerate(raw_ratios):
+                        normalized_factor = (ratio - min_r) / range_r
+                        if STRETCH_COMPARE == 'GREATER' and normalized_factor > safe_stretch_factor:
+                            vert_selections[i] = True
+                        elif STRETCH_COMPARE == 'LESS' and normalized_factor < safe_stretch_factor:
+                            vert_selections[i] = True
+                # -------------------------------------------------------------
+                # ROTATION SELECTION
+                # -------------------------------------------------------------
+                elif SELECTION_MODE == 'ROT':
+                    required_attrs = ['rot_0', 'rot_1', 'rot_2', 'rot_3']
+                    if not all(a in attrs for a in required_attrs):
+                        raise ValueError("Missing rot_0/1/2/3 attributes.")
+                    r0, r1, r2, r3 = [attrs[a].data for a in required_attrs]
+                    rad_eul = [math.radians(target_rx), math.radians(target_ry), math.radians(target_rz)]
+                    target_quat = mathutils.Euler(rad_eul, 'XYZ').to_quaternion()
+                    target_quat.normalize()
+                    for i in range(len(mesh.vertices)):
+                        vert_quat = mathutils.Quaternion((float(r0[i].value), float(r1[i].value), float(r2[i].value), float(r3[i].value)))
+                        if vert_quat.magnitude > 0.0001:
+                            vert_quat.normalize()
+                            angle_diff = target_quat.rotation_difference(vert_quat).angle
+                            angle_deg = math.degrees(angle_diff)
+                            is_match = angle_deg <= safe_rot_tol
+                            if ROT_COMPARE == 'EQUAL' and is_match:
+                                vert_selections[i] = True
+                            elif ROT_COMPARE == 'NOT_EQUAL' and not is_match:
+                                vert_selections[i] = True
+                # -------------------------------------------------------------
+                # APPLY SELECTION
+                # -------------------------------------------------------------
+                bm = bmesh.new()
+                bm.from_mesh(mesh)
+                bm.verts.ensure_lookup_table()
+                count = 0
+                for i, vert in enumerate(bm.verts):
+                    if CLEAR_PREVIOUS and not vert_selections[i]:
+                        vert.select = False
+                    if vert_selections[i]:
+                        vert.select = True
+                        count += 1
+                bm.to_mesh(mesh)
+                bm.free()
+                mesh.update()
+                if bpy.context.active_object and bpy.context.active_object.mode != original_mode:
+                    bpy.ops.object.mode_set(mode=original_mode)
+                SCRIPT_SUCCESS = True
+                SELECTED_COUNT = count
+            else:
+                ERROR_MSG = "Invalid or missing target object."
+                SCRIPT_SUCCESS = False
+        except Exception as exc:
+            SCRIPT_SUCCESS = False
+            SELECTED_COUNT = 0
+            ERROR_MSG = str(exc)
+            print(f"3DGS Attribute Selection Error: {exc}")
+            if 'original_mode' in locals() and bpy.context.active_object:
+                if bpy.context.active_object.mode != original_mode:
+                    bpy.ops.object.mode_set(mode=original_mode)
+        return {"FINISHED"}
+
+    def draw(self, context):
+        layout = self.layout
+        if bpy.context.scene.sna_dgs_scene_properties.select_attribute_type == "SCALE":
+            col_94F1A = layout.column(heading='', align=False)
+            col_94F1A.alert = False
+            col_94F1A.enabled = True
+            col_94F1A.active = True
+            col_94F1A.use_property_split = False
+            col_94F1A.use_property_decorate = False
+            col_94F1A.scale_x = 1.0
+            col_94F1A.scale_y = 1.0
+            col_94F1A.alignment = 'Expand'.upper()
+            col_94F1A.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+            col_94F1A.prop(self, 'sna_scale_target_attr', text=self.sna_scale_target_attr, icon_value=0, emboss=True, expand=True)
+            col_94F1A.prop(self, 'sna_scale_factor', text='Factor', icon_value=0, emboss=True, expand=False)
+            row_0FEBA = col_94F1A.row(heading='', align=False)
+            row_0FEBA.alert = False
+            row_0FEBA.enabled = True
+            row_0FEBA.active = True
+            row_0FEBA.use_property_split = False
+            row_0FEBA.use_property_decorate = False
+            row_0FEBA.scale_x = 1.0
+            row_0FEBA.scale_y = 1.0
+            row_0FEBA.alignment = 'Expand'.upper()
+            row_0FEBA.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+            row_0FEBA.prop(self, 'sna_scale_compare', text=self.sna_scale_compare, icon_value=0, emboss=True, expand=True)
+        elif bpy.context.scene.sna_dgs_scene_properties.select_attribute_type == "ROT":
+            col_50BE3 = layout.column(heading='', align=False)
+            col_50BE3.alert = False
+            col_50BE3.enabled = True
+            col_50BE3.active = True
+            col_50BE3.use_property_split = False
+            col_50BE3.use_property_decorate = False
+            col_50BE3.scale_x = 1.0
+            col_50BE3.scale_y = 1.0
+            col_50BE3.alignment = 'Expand'.upper()
+            col_50BE3.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+            col_50BE3.prop(self, 'sna_rot_target_euler', text='Target Rotation', icon_value=0, emboss=True)
+            col_50BE3.prop(self, 'sna_rot_tolerance_deg', text='Tolerance', icon_value=0, emboss=True, expand=False)
+            row_9826B = col_50BE3.row(heading='', align=False)
+            row_9826B.alert = False
+            row_9826B.enabled = True
+            row_9826B.active = True
+            row_9826B.use_property_split = False
+            row_9826B.use_property_decorate = False
+            row_9826B.scale_x = 1.0
+            row_9826B.scale_y = 1.0
+            row_9826B.alignment = 'Expand'.upper()
+            row_9826B.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+            row_9826B.prop(self, 'sna_rot_compare', text=self.sna_rot_compare, icon_value=0, emboss=True, expand=True)
+        elif bpy.context.scene.sna_dgs_scene_properties.select_attribute_type == "STRETCH":
+            col_0EDB7 = layout.column(heading='', align=False)
+            col_0EDB7.alert = False
+            col_0EDB7.enabled = True
+            col_0EDB7.active = True
+            col_0EDB7.use_property_split = False
+            col_0EDB7.use_property_decorate = False
+            col_0EDB7.scale_x = 1.0
+            col_0EDB7.scale_y = 1.0
+            col_0EDB7.alignment = 'Expand'.upper()
+            col_0EDB7.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+            col_0EDB7.prop(self, 'sna_scale_factor', text='Factor', icon_value=0, emboss=True, expand=False)
+            row_1AE6E = col_0EDB7.row(heading='', align=False)
+            row_1AE6E.alert = False
+            row_1AE6E.enabled = True
+            row_1AE6E.active = True
+            row_1AE6E.use_property_split = False
+            row_1AE6E.use_property_decorate = False
+            row_1AE6E.scale_x = 1.0
+            row_1AE6E.scale_y = 1.0
+            row_1AE6E.alignment = 'Expand'.upper()
+            row_1AE6E.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+            row_1AE6E.prop(self, 'sna_scale_compare', text=self.sna_scale_compare, icon_value=0, emboss=True, expand=True)
+        else:
+            pass
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=300)
+
+
+class SNA_OT_Dgs_Render_Select_By_Object_92F9C(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_select_by_object_92f9c"
+    bl_label = "3DGS Render: Select by object"
+    bl_description = "Select points based on a selection objects"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        SELECTION_OBJ = bpy.context.scene.sna_dgs_scene_properties.select_select_by_obj
+        SELECT_MODE = bpy.context.scene.sna_dgs_scene_properties.select_obj_select_mode
+        CLEAR_PREVIOUS = None
+        import bmesh
+        from mathutils.bvhtree import BVHTree
+        # =========================================================================
+        # 1. ROOT LEVEL DECLARATIONS (Module Level)
+        # Serpens will inject your node socket values into these variables
+        # =========================================================================
+        TARGET_OBJ = bpy.context.active_object
+        #SELECTION_OBJ = bpy.data.objects.get("Cube")
+        #SELECT_MODE = "INSIDE"
+        CLEAR_PREVIOUS = True
+        # Declare global output variables at the module level [cite: 143]
+        SCRIPT_SUCCESS = False
+        SELECTED_COUNT = 0
+        # =========================================================================
+        # 2. MAIN FUNCTION (No global keyword used inside)
+        # =========================================================================
+
+        def execute_volumetric_selection():
+            # We do NOT use 'global SCRIPT_SUCCESS' here[cite: 167].
+            # Safety Checks: Return early instead of failing silently
+            if not TARGET_OBJ or TARGET_OBJ.type != 'MESH':
+                return False, 0
+            if not SELECTION_OBJ or SELECTION_OBJ.type != 'MESH':
+                return True, 0 # Passing safely so nodes don't freeze
+            if SELECTION_OBJ.name not in bpy.context.view_layer.objects:
+                return True, 0
+            original_mode = 'OBJECT'
+            if bpy.context.active_object:
+                original_mode = bpy.context.active_object.mode
+            if bpy.context.mode != 'OBJECT':
+                bpy.ops.object.mode_set(mode='OBJECT')
+            try:
+                # Build a BVH Tree for the Selection Volume
+                depsgraph = bpy.context.evaluated_depsgraph_get()
+                bm_sel = bmesh.new()
+                bm_sel.from_object(SELECTION_OBJ, depsgraph)
+                bm_sel.transform(SELECTION_OBJ.matrix_world) 
+                bvh = BVHTree.FromBMesh(bm_sel)
+                bm_sel.free()
+                # Access the Target Mesh data
+                bm_target = bmesh.new()
+                bm_target.from_mesh(TARGET_OBJ.data)
+                bm_target.transform(TARGET_OBJ.matrix_world) 
+                bm_target.verts.ensure_lookup_table()
+                if CLEAR_PREVIOUS:
+                    for v in bm_target.verts:
+                        v.select = False
+                # Raycast Logic
+                ray_dir = Vector((0.0, 0.0, 1.0)) 
+                count = 0
+                for v in bm_target.verts:
+                    hits = 0
+                    current_loc = v.co.copy()
+                    while True:
+                        location, normal, index, dist = bvh.ray_cast(current_loc, ray_dir)
+                        if location is None:
+                            break
+                        hits += 1
+                        current_loc = location + (ray_dir * 0.0001)
+                    is_inside = (hits % 2 != 0)
+                    if SELECT_MODE == "INSIDE" and is_inside:
+                        v.select = True
+                        count += 1
+                    elif SELECT_MODE == "OUTSIDE" and not is_inside:
+                        v.select = True
+                        count += 1
+                # Apply and Cleanup
+                matrix_world_inv = TARGET_OBJ.matrix_world.inverted()
+                bm_target.transform(matrix_world_inv)
+                bm_target.to_mesh(TARGET_OBJ.data)
+                bm_target.free()
+                TARGET_OBJ.data.update() 
+                if bpy.context.active_object and bpy.context.active_object.mode != original_mode:
+                     bpy.ops.object.mode_set(mode=original_mode)
+                # Return values from functions instead of setting globals inside 
+                return True, count
+            except Exception as e:
+                print(f"Serpens Script Error: {e}")
+                # Ensure we return to original mode even on failure
+                if bpy.context.active_object and bpy.context.active_object.mode != original_mode:
+                     bpy.ops.object.mode_set(mode=original_mode)
+                return False, 0
+        # =========================================================================
+        # 3. EXECUTE AND CATCH
+        # Execute main function [cite: 154]
+        # =========================================================================
+        result_success, result_count = execute_volumetric_selection()
+        # =========================================================================
+        # 4. MODULE LEVEL ASSIGNMENT
+        # Set global variables at MODULE LEVEL for Serpens access [cite: 156]
+        # =========================================================================
+        SCRIPT_SUCCESS = result_success
+        SELECTED_COUNT = result_count
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+def sna_light_bake_apply_A5653(layout_function, ):
+    if 'proxy_deferred_relight_stage_baked' in bpy.context.view_layer.objects.active:
+        if bpy.context.view_layer.objects.active['proxy_deferred_relight_stage_baked']:
+            pass
+        else:
+            box_FAC0D = layout_function.box()
+            box_FAC0D.alert = False
+            box_FAC0D.enabled = True
+            box_FAC0D.active = True
+            box_FAC0D.use_property_split = False
+            box_FAC0D.use_property_decorate = False
+            box_FAC0D.alignment = 'Expand'.upper()
+            box_FAC0D.scale_x = 1.0
+            box_FAC0D.scale_y = 1.0
+            if not True: box_FAC0D.operator_context = "EXEC_DEFAULT"
+            box_FAC0D.label(text='Bake light data before applying', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+    else:
+        box_C3353 = layout_function.box()
+        box_C3353.alert = False
+        box_C3353.enabled = True
+        box_C3353.active = True
+        box_C3353.use_property_split = False
+        box_C3353.use_property_decorate = False
+        box_C3353.alignment = 'Expand'.upper()
+        box_C3353.scale_x = 1.0
+        box_C3353.scale_y = 1.0
+        if not True: box_C3353.operator_context = "EXEC_DEFAULT"
+        box_C3353.label(text='Bake light data before applying', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+    box_FCA92 = layout_function.box()
+    box_FCA92.alert = False
+    box_FCA92.enabled = True
+    box_FCA92.active = True
+    box_FCA92.use_property_split = False
+    box_FCA92.use_property_decorate = False
+    box_FCA92.alignment = 'Expand'.upper()
+    box_FCA92.scale_x = 1.0
+    box_FCA92.scale_y = 1.0
+    if not True: box_FCA92.operator_context = "EXEC_DEFAULT"
+    box_FCA92.label(text='Light Pass Mix', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')))
+    col_55C97 = box_FCA92.column(heading='', align=True)
+    col_55C97.alert = False
+    col_55C97.enabled = True
+    col_55C97.active = True
+    col_55C97.use_property_split = False
+    col_55C97.use_property_decorate = False
+    col_55C97.scale_x = 1.0
+    col_55C97.scale_y = 1.0
+    col_55C97.alignment = 'Expand'.upper()
+    col_55C97.operator_context = "INVOKE_DEFAULT" if False else "EXEC_DEFAULT"
+    col_55C97.prop(bpy.context.scene.sna_dgs_scene_properties, 'indirect_strength', text='Indirect Strength', icon_value=0, emboss=True)
+    col_55C97.prop(bpy.context.scene.sna_dgs_scene_properties, 'direct_strength', text='Direct Strength', icon_value=0, emboss=True)
+    col_55C97.prop(bpy.context.scene.sna_dgs_scene_properties, 'occlusion_strength', text='Occlusion Strength', icon_value=0, emboss=True)
+    col_55C97.prop(bpy.context.scene.sna_dgs_scene_properties, 'shadow_strength', text='Shadow Strength', icon_value=0, emboss=True)
+    if (bpy.context.scene.sna_dgs_scene_properties.relight_include_world_environment or bpy.context.scene.sna_dgs_scene_properties.relight_include_scene_lights):
+        col_2D53F = layout_function.column(heading='', align=True)
+        col_2D53F.alert = False
+        col_2D53F.enabled = True
+        col_2D53F.active = True
+        col_2D53F.use_property_split = False
+        col_2D53F.use_property_decorate = False
+        col_2D53F.scale_x = 1.0
+        col_2D53F.scale_y = 1.0
+        col_2D53F.alignment = 'Expand'.upper()
+        col_2D53F.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+        box_C2FE8 = col_2D53F.box()
+        box_C2FE8.alert = False
+        box_C2FE8.enabled = True
+        box_C2FE8.active = True
+        box_C2FE8.use_property_split = False
+        box_C2FE8.use_property_decorate = False
+        box_C2FE8.alignment = 'Expand'.upper()
+        box_C2FE8.scale_x = 1.0
+        box_C2FE8.scale_y = 1.0
+        if not True: box_C2FE8.operator_context = "EXEC_DEFAULT"
+        col_A17CD = box_C2FE8.column(heading='', align=True)
+        col_A17CD.alert = False
+        col_A17CD.enabled = True
+        col_A17CD.active = True
+        col_A17CD.use_property_split = False
+        col_A17CD.use_property_decorate = False
+        col_A17CD.scale_x = 1.0
+        col_A17CD.scale_y = 1.0
+        col_A17CD.alignment = 'Expand'.upper()
+        col_A17CD.operator_context = "INVOKE_DEFAULT" if False else "EXEC_DEFAULT"
+        col_A17CD.label(text='Color Mix', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')))
+        split_C326C = col_A17CD.split(factor=0.5, align=False)
+        split_C326C.alert = False
+        split_C326C.enabled = True
+        split_C326C.active = True
+        split_C326C.use_property_split = False
+        split_C326C.use_property_decorate = False
+        split_C326C.scale_x = 1.0
+        split_C326C.scale_y = 1.0
+        split_C326C.alignment = 'Expand'.upper()
+        if not True: split_C326C.operator_context = "EXEC_DEFAULT"
+        split_C326C.label(text='Factor Curve', icon_value=0)
+        split_C326C.prop(bpy.context.scene.sna_dgs_scene_properties, 'relight_factor_curve_mode', text='', icon_value=0, emboss=True)
+        split_AB173 = col_A17CD.split(factor=0.5, align=False)
+        split_AB173.alert = False
+        split_AB173.enabled = True
+        split_AB173.active = True
+        split_AB173.use_property_split = False
+        split_AB173.use_property_decorate = False
+        split_AB173.scale_x = 1.0
+        split_AB173.scale_y = 1.0
+        split_AB173.alignment = 'Expand'.upper()
+        if not True: split_AB173.operator_context = "EXEC_DEFAULT"
+        split_AB173.label(text='Factor Mode', icon_value=0)
+        split_AB173.prop(bpy.context.scene.sna_dgs_scene_properties, 'relight_lighting_factor_mode', text='', icon_value=0, emboss=True)
+        if (bpy.context.scene.sna_dgs_scene_properties.relight_lighting_factor_mode == 'Luminance'):
+            pass
+        else:
+            col_D67D0 = col_A17CD.column(heading='', align=True)
+            col_D67D0.alert = False
+            col_D67D0.enabled = True
+            col_D67D0.active = True
+            col_D67D0.use_property_split = False
+            col_D67D0.use_property_decorate = False
+            col_D67D0.scale_x = 1.0
+            col_D67D0.scale_y = 1.0
+            col_D67D0.alignment = 'Expand'.upper()
+            col_D67D0.operator_context = "INVOKE_DEFAULT" if False else "EXEC_DEFAULT"
+            col_D67D0.prop(bpy.context.scene.sna_dgs_scene_properties, 'relight_colorize_mix', text='Color Mix', icon_value=0, emboss=True)
+            split_18C65 = col_D67D0.split(factor=0.4000000059604645, align=True)
+            split_18C65.alert = False
+            split_18C65.enabled = True
+            split_18C65.active = True
+            split_18C65.use_property_split = False
+            split_18C65.use_property_decorate = False
+            split_18C65.scale_x = 1.0
+            split_18C65.scale_y = 1.0
+            split_18C65.alignment = 'Expand'.upper()
+            if not True: split_18C65.operator_context = "EXEC_DEFAULT"
+            split_18C65.prop(bpy.context.scene.sna_dgs_scene_properties, 'relight_max_color_tint', text='Max Tint', icon_value=0, emboss=True)
+            split_18C65.prop(bpy.context.scene.sna_dgs_scene_properties, 'max_color_tint_mode', text='', icon_value=0, emboss=True)
+        box_85BFD = col_2D53F.box()
+        box_85BFD.alert = False
+        box_85BFD.enabled = True
+        box_85BFD.active = True
+        box_85BFD.use_property_split = False
+        box_85BFD.use_property_decorate = False
+        box_85BFD.alignment = 'Expand'.upper()
+        box_85BFD.scale_x = 1.0
+        box_85BFD.scale_y = 1.0
+        if not True: box_85BFD.operator_context = "EXEC_DEFAULT"
+        box_85BFD.label(text='Global Strength', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')))
+        col_B19E2 = box_85BFD.column(heading='', align=True)
+        col_B19E2.alert = False
+        col_B19E2.enabled = True
+        col_B19E2.active = True
+        col_B19E2.use_property_split = False
+        col_B19E2.use_property_decorate = False
+        col_B19E2.scale_x = 1.0
+        col_B19E2.scale_y = 1.0
+        col_B19E2.alignment = 'Expand'.upper()
+        col_B19E2.operator_context = "INVOKE_DEFAULT" if False else "EXEC_DEFAULT"
+        col_B19E2.prop(bpy.context.scene.sna_dgs_scene_properties, 'ambient_floor', text='Ambient Base', icon_value=0, emboss=True)
+        col_B19E2.prop(bpy.context.scene.sna_dgs_scene_properties, 'light_gain', text='Light Gain', icon_value=0, emboss=True)
+        col_B19E2.prop(bpy.context.scene.sna_dgs_scene_properties, 'light_power', text='Light Contrast', icon_value=0, emboss=True)
+        col_B19E2.prop(bpy.context.scene.sna_dgs_scene_properties, 'max_light_factor', text='Max Light Factor', icon_value=0, emboss=True)
+        box_51F49 = col_2D53F.box()
+        box_51F49.alert = False
+        box_51F49.enabled = True
+        box_51F49.active = True
+        box_51F49.use_property_split = False
+        box_51F49.use_property_decorate = False
+        box_51F49.alignment = 'Expand'.upper()
+        box_51F49.scale_x = 1.0
+        box_51F49.scale_y = 1.0
+        if not True: box_51F49.operator_context = "EXEC_DEFAULT"
+        box_51F49.label(text='SH Updates', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')))
+        col_57EA1 = box_51F49.column(heading='', align=True)
+        col_57EA1.alert = False
+        col_57EA1.enabled = True
+        col_57EA1.active = True
+        col_57EA1.use_property_split = False
+        col_57EA1.use_property_decorate = False
+        col_57EA1.scale_x = 1.0
+        col_57EA1.scale_y = 1.0
+        col_57EA1.alignment = 'Expand'.upper()
+        col_57EA1.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+        col_57EA1.prop(bpy.context.scene.sna_dgs_scene_properties, 'export_mode', text='', icon_value=0, emboss=True)
+        if (bpy.context.scene.sna_dgs_scene_properties.export_mode == 'Dampen Original SH'):
+            col_57EA1.prop(bpy.context.scene.sna_dgs_scene_properties, 'directionality_strength', text='SH Strength', icon_value=0, emboss=True)
+        box_BBA23 = col_2D53F.box()
+        box_BBA23.alert = False
+        box_BBA23.enabled = True
+        box_BBA23.active = True
+        box_BBA23.use_property_split = False
+        box_BBA23.use_property_decorate = False
+        box_BBA23.alignment = 'Expand'.upper()
+        box_BBA23.scale_x = 1.0
+        box_BBA23.scale_y = 2.0
+        if not True: box_BBA23.operator_context = "EXEC_DEFAULT"
+        op = box_BBA23.operator('sna.dgs_render_apply_light_data_6c5ad', text='Apply Lighting', icon_value=0, emboss=True, depress=False)
+
+
+def sna_light_bake_build_8B9DD(layout_function, ):
+    box_90A4F = layout_function.box()
+    box_90A4F.alert = False
+    box_90A4F.enabled = True
+    box_90A4F.active = True
+    box_90A4F.use_property_split = False
+    box_90A4F.use_property_decorate = False
+    box_90A4F.alignment = 'Expand'.upper()
+    box_90A4F.scale_x = 1.0
+    box_90A4F.scale_y = 1.0
+    if not True: box_90A4F.operator_context = "EXEC_DEFAULT"
+    box_90A4F.label(text='Include', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')))
+    row_095CC = box_90A4F.row(heading='', align=False)
+    row_095CC.alert = False
+    row_095CC.enabled = True
+    row_095CC.active = True
+    row_095CC.use_property_split = False
+    row_095CC.use_property_decorate = False
+    row_095CC.scale_x = 1.0
+    row_095CC.scale_y = 1.0
+    row_095CC.alignment = 'Expand'.upper()
+    row_095CC.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+    row_095CC.prop(bpy.context.scene.sna_dgs_scene_properties, 'relight_include_world_environment', text='World', icon_value=0, emboss=True)
+    row_095CC.prop(bpy.context.scene.sna_dgs_scene_properties, 'relight_include_scene_lights', text='Light Objects', icon_value=0, emboss=True)
+    if (bpy.context.scene.sna_dgs_scene_properties.relight_include_world_environment or bpy.context.scene.sna_dgs_scene_properties.relight_include_scene_lights):
+        col_AD78B = layout_function.column(heading='', align=True)
+        col_AD78B.alert = False
+        col_AD78B.enabled = True
+        col_AD78B.active = True
+        col_AD78B.use_property_split = False
+        col_AD78B.use_property_decorate = False
+        col_AD78B.scale_x = 1.0
+        col_AD78B.scale_y = 1.0
+        col_AD78B.alignment = 'Expand'.upper()
+        col_AD78B.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+        box_4882E = col_AD78B.box()
+        box_4882E.alert = False
+        box_4882E.enabled = True
+        box_4882E.active = True
+        box_4882E.use_property_split = False
+        box_4882E.use_property_decorate = False
+        box_4882E.alignment = 'Expand'.upper()
+        box_4882E.scale_x = 1.0
+        box_4882E.scale_y = 1.0
+        if not True: box_4882E.operator_context = "EXEC_DEFAULT"
+        col_3E710 = box_4882E.column(heading='', align=True)
+        col_3E710.alert = False
+        col_3E710.enabled = True
+        col_3E710.active = True
+        col_3E710.use_property_split = False
+        col_3E710.use_property_decorate = False
+        col_3E710.scale_x = 1.0
+        col_3E710.scale_y = 1.0
+        col_3E710.alignment = 'Expand'.upper()
+        col_3E710.operator_context = "INVOKE_DEFAULT" if False else "EXEC_DEFAULT"
+        col_3E710.label(text='Interpolation', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')))
+        col_3E710.prop(bpy.context.scene.sna_dgs_scene_properties, 'normal_smoothing', text='Proxy Normal Smoothing', icon_value=0, emboss=True)
+        col_3E710.prop(bpy.context.scene.sna_dgs_scene_properties, 'pre_light_smoothing', text='Pre-Light Smoothing', icon_value=0, emboss=True)
+        col_3E710.prop(bpy.context.scene.sna_dgs_scene_properties, 'post_light_smoothing', text='Post-Light Smoothing', icon_value=0, emboss=True)
+        split_755B4 = col_3E710.split(factor=0.5, align=False)
+        split_755B4.alert = False
+        split_755B4.enabled = True
+        split_755B4.active = True
+        split_755B4.use_property_split = False
+        split_755B4.use_property_decorate = False
+        split_755B4.scale_x = 1.0
+        split_755B4.scale_y = 1.0
+        split_755B4.alignment = 'Expand'.upper()
+        if not True: split_755B4.operator_context = "EXEC_DEFAULT"
+        split_755B4.label(text='Transfer Style', icon_value=0)
+        split_755B4.prop(bpy.context.scene.sna_dgs_scene_properties, 'transfer_style', text='', icon_value=0, emboss=True)
+        if (bpy.context.scene.sna_dgs_scene_properties.transfer_style == 'Accurate'):
+            pass
+        else:
+            col_3E710.prop(bpy.context.scene.sna_dgs_scene_properties, 'transfer_smoothness', text='Transfer Smoothness', icon_value=0, emboss=True)
+        if bpy.context.scene.sna_dgs_scene_properties.relight_include_world_environment:
+            box_018E2 = col_AD78B.box()
+            box_018E2.alert = False
+            box_018E2.enabled = True
+            box_018E2.active = True
+            box_018E2.use_property_split = False
+            box_018E2.use_property_decorate = False
+            box_018E2.alignment = 'Expand'.upper()
+            box_018E2.scale_x = 1.0
+            box_018E2.scale_y = 1.0
+            if not True: box_018E2.operator_context = "EXEC_DEFAULT"
+            col_12C25 = box_018E2.column(heading='', align=True)
+            col_12C25.alert = False
+            col_12C25.enabled = True
+            col_12C25.active = True
+            col_12C25.use_property_split = False
+            col_12C25.use_property_decorate = False
+            col_12C25.scale_x = 1.0
+            col_12C25.scale_y = 1.0
+            col_12C25.alignment = 'Expand'.upper()
+            col_12C25.operator_context = "INVOKE_DEFAULT" if False else "EXEC_DEFAULT"
+            col_12C25.label(text='World Light', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')))
+            col_12C25.prop(bpy.context.scene.sna_dgs_scene_properties, 'hdri_max_width', text='HDRI Max Width', icon_value=0, emboss=True)
+            col_12C25.prop(bpy.context.scene.sna_dgs_scene_properties, 'irradiance_resolution', text='Irradiance Resolution', icon_value=0, emboss=True)
+            col_12C25.prop(bpy.context.scene.sna_dgs_scene_properties, 'irradiance_blur_strength', text='Irradiance Blur', icon_value=0, emboss=True)
+            col_12C25.prop(bpy.context.scene.sna_dgs_scene_properties, 'irradiance_luminance_clamp', text='Irradiance Clamp', icon_value=0, emboss=True)
+        if bpy.context.scene.sna_dgs_scene_properties.relight_include_world_environment:
+            box_10AE9 = col_AD78B.box()
+            box_10AE9.alert = False
+            box_10AE9.enabled = True
+            box_10AE9.active = True
+            box_10AE9.use_property_split = False
+            box_10AE9.use_property_decorate = False
+            box_10AE9.alignment = 'Expand'.upper()
+            box_10AE9.scale_x = 1.0
+            box_10AE9.scale_y = 1.0
+            if not True: box_10AE9.operator_context = "EXEC_DEFAULT"
+            box_10AE9.label(text='World Occlusion', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')))
+            box_10AE9.prop(bpy.context.scene.sna_dgs_scene_properties, 'use_proxy_occlusion', text='Enable Proxy Occlusion', icon_value=0, emboss=True)
+            if bpy.context.scene.sna_dgs_scene_properties.use_proxy_occlusion:
+                col_803AA = box_10AE9.column(heading='', align=True)
+                col_803AA.alert = False
+                col_803AA.enabled = True
+                col_803AA.active = True
+                col_803AA.use_property_split = False
+                col_803AA.use_property_decorate = False
+                col_803AA.scale_x = 1.0
+                col_803AA.scale_y = 1.0
+                col_803AA.alignment = 'Expand'.upper()
+                col_803AA.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                col_803AA.prop(bpy.context.scene.sna_dgs_scene_properties, 'occlusion_sample_count', text='Occlusion sample count', icon_value=0, emboss=True)
+                col_803AA.prop(bpy.context.scene.sna_dgs_scene_properties, 'occlusion_bias', text='Occlusion bias', icon_value=0, emboss=True)
+                col_803AA.prop(bpy.context.scene.sna_dgs_scene_properties, 'occlusion_max_distance', text='Occlusion Max Distance', icon_value=0, emboss=True)
+        if bpy.context.scene.sna_dgs_scene_properties.relight_include_scene_lights:
+            box_8F86C = col_AD78B.box()
+            box_8F86C.alert = False
+            box_8F86C.enabled = True
+            box_8F86C.active = True
+            box_8F86C.use_property_split = False
+            box_8F86C.use_property_decorate = False
+            box_8F86C.alignment = 'Expand'.upper()
+            box_8F86C.scale_x = 1.0
+            box_8F86C.scale_y = 1.0
+            if not True: box_8F86C.operator_context = "EXEC_DEFAULT"
+            col_548B3 = box_8F86C.column(heading='', align=True)
+            col_548B3.alert = False
+            col_548B3.enabled = True
+            col_548B3.active = True
+            col_548B3.use_property_split = False
+            col_548B3.use_property_decorate = False
+            col_548B3.scale_x = 1.0
+            col_548B3.scale_y = 1.0
+            col_548B3.alignment = 'Expand'.upper()
+            col_548B3.operator_context = "INVOKE_DEFAULT" if False else "EXEC_DEFAULT"
+            col_548B3.label(text='Light Objects', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')))
+            col_548B3.prop(bpy.context.scene.sna_dgs_scene_properties, 'include_hidden_lights', text='Include Hidden Lights', icon_value=0, emboss=True)
+            col_548B3.prop(bpy.context.scene.sna_dgs_scene_properties, 'relight_scene_light_gain', text='Light Gain', icon_value=0, emboss=True)
+            col_548B3.prop(bpy.context.scene.sna_dgs_scene_properties, 'relight_use_light_shadows', text='Light Object Shadows', icon_value=0, emboss=True)
+            col_548B3.prop(bpy.context.scene.sna_dgs_scene_properties, 'light_shadow_bias', text='Light Object Shadow Bias', icon_value=0, emboss=True)
+        box_A44FD = col_AD78B.box()
+        box_A44FD.alert = False
+        box_A44FD.enabled = True
+        box_A44FD.active = True
+        box_A44FD.use_property_split = False
+        box_A44FD.use_property_decorate = False
+        box_A44FD.alignment = 'Expand'.upper()
+        box_A44FD.scale_x = 1.0
+        box_A44FD.scale_y = 2.0
+        if not True: box_A44FD.operator_context = "EXEC_DEFAULT"
+        op = box_A44FD.operator('sna.dgs_render_build_light_data_ab375', text='Bake Light Data', icon_value=0, emboss=True, depress=False)
+
+
+class SNA_OT_Dgs_Render_Build_Light_Data_Ab375(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_build_light_data_ab375"
+    bl_label = "3DGS Render: Build Light Data"
+    bl_description = ""
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        sna_relight2_1_build_base_color_from_f_dc_BAE18()
+        sna_relight2_2_build_proxy_hdri_relight_89C9C()
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+class SNA_OT_Dgs_Render_Restore_Original_Light_9A7Fe(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_restore_original_light_9a7fe"
+    bl_label = "3DGS Render: Restore Original Light"
+    bl_description = ""
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        sna_relight2_4_restore_original_3dgs_color_08334()
+        sna_relight_5__create_col_and_vertex_paint_2AE5F()
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+class SNA_OT_Dgs_Render_Store_Original_Lighting_99939(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_store_original_lighting_99939"
+    bl_label = "3DGS Render: Store Original Lighting"
+    bl_description = ""
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        sna_relight2_0_save_original_3dgs_color_76EB6()
+        return {"FINISHED"}
+
+    def draw(self, context):
+        layout = self.layout
+        box_44ADA = layout.box()
+        box_44ADA.alert = False
+        box_44ADA.enabled = True
+        box_44ADA.active = True
+        box_44ADA.use_property_split = False
+        box_44ADA.use_property_decorate = False
+        box_44ADA.alignment = 'Expand'.upper()
+        box_44ADA.scale_x = 1.0
+        box_44ADA.scale_y = 1.0
+        if not True: box_44ADA.operator_context = "EXEC_DEFAULT"
+        box_44ADA.label(text='Any existing stored base light data will be overwritten', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+        box_44ADA.label(text='The current state will be set as the new base light state', icon_value=0)
+        box_44ADA.label(text="This action will not respond to 'undo' commands", icon_value=0)
+        box_44ADA.separator(factor=1.0)
+        box_44ADA.label(text='Adding, deleting or merging points will corrupt stored data.', icon_value=0)
+        box_44ADA.label(text='Edit your mesh before Light Baking, or to edit later;', icon_value=0)
+        box_44ADA.label(text='restore lighting, edit mesh, store and re-bake lights', icon_value=0)
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=400)
+
+
+def sna_relight2_4_restore_original_3dgs_color_08334():
+    relight_cache_root = bpy.context.preferences.addons[__package__].preferences.sna_cache_file_directory
+    proxy_surface_relight_utils_path = os.path.join(os.path.dirname(__file__), 'assets', 'proxy_deferred_layers_utils.py')
+    proxy_binding_utils_path = os.path.join(os.path.dirname(__file__), 'assets', 'proxy_binding_utils.py')
+    # UI range note: "Soft" means the recommended Serpens slider range; "Hard" means the safe absolute clamp.
+    #proxy_surface_relight_utils_path = "D:/GithubRepos/3DGS Render_Render Updates/relighting/proxy_deferred_layers_v2_overlay_only/proxy_deferred_layers_utils.py"  # Input: full path to proxy_deferred_layers_utils.py. UI: path text, no numeric min/max.
+    #proxy_binding_utils_path = "D:/GithubRepos/3DGS Render_Render Updates/rigging/proxy_binding_utils.py"  # Input: full path to proxy_binding_utils.py. UI: path text, no numeric min/max.
+    #relight_cache_root = "D:/GithubRepos/3DGS Render_Render Updates/relighting"  # Input: optional folder for relight packages; blank = blend folder if saved, otherwise system temp. UI: folder path, no numeric min/max.
+    target_mode = "Active"  # Input: Active or Input Object. UI: enum, no numeric min/max.
+    target_obj = None  # Input: object pointer or object name. UI: show only when target_mode is Input Object; no numeric min/max.
+    clear_temp_attributes = True  # Input: True = remove any leftover legacy temp relight attrs from older workflows. UI: boolean, hard False/True.
+    clear_saved_state = False  # Input: True = remove the saved original color package after restore. UI: boolean, hard False/True.
+    show_progress_overlay = True  # Input: True = show restore progress in the viewport/status bar. UI: boolean, hard False/True.
+    raise_on_error = False  # Input: True = raise actual exceptions, False = fail softly. UI: boolean, hard False/True.
+    success = False
+    status_message = ""
+    target_object_name = ""
+    logical_splat_count = 0
+    restored_sh_degree = 0
+    removed_temp_attributes = []
+    removed_saved_files = []
+
+    def load_utils():
+        module_path = str(proxy_surface_relight_utils_path).strip()
+        if not module_path:
+            raise RuntimeError("proxy_surface_relight_utils_path is blank.")
+        spec = importlib.util.spec_from_file_location(
+            "proxy_surface_relight_utils_runtime_restore",
+            module_path,
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Could not load proxy_deferred_layers_utils.py from '{module_path}'.")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def main():
+        global success
+        global status_message
+        global target_object_name
+        global logical_splat_count
+        global restored_sh_degree
+        global removed_temp_attributes
+        global removed_saved_files
+        print("Restoring the original saved 3DGS color state from proxy deferred relighting...")
+        utils = load_utils()
+        mesh_obj = utils.resolve_target_mesh_object(
+            target_mode=target_mode,
+            target_obj=target_obj,
+            proxy_binding_utils_path=proxy_binding_utils_path,
+        )
+        progress_started = False
+        progress_end_message = ""
+        try:
+            if show_progress_overlay:
+                utils.begin_proxy_deferred_progress_overlay(
+                    total_steps=3,
+                    object_name=mesh_obj.name,
+                    title="Proxy Deferred Restore Original",
+                )
+                progress_started = True
+                utils.update_proxy_deferred_progress_overlay(
+                    1,
+                    3,
+                    status_message="Loading saved original color state...",
+                )
+            result = utils.restore_original_color_state(
+                mesh_obj,
+                relight_cache_root=relight_cache_root,
+                clear_temp_attributes=clear_temp_attributes,
+                clear_saved_state=clear_saved_state,
+                proxy_binding_utils_path=proxy_binding_utils_path,
+            )
+            if progress_started:
+                utils.update_proxy_deferred_progress_overlay(
+                    3,
+                    3,
+                    status_message="Restored original color state.",
+                )
+            progress_end_message = f"Finished restoring original color for {mesh_obj.name}."
+        except Exception:
+            progress_end_message = f"Proxy deferred restore failed for {mesh_obj.name}."
+            raise
+        finally:
+            if progress_started:
+                utils.end_proxy_deferred_progress_overlay(progress_end_message)
+        target_object_name = mesh_obj.name
+        logical_splat_count = int(result["logical_splat_count"])
+        restored_sh_degree = int(result["sh_degree"])
+        removed_temp_attributes = list(result["removed_attributes"])
+        removed_saved_files = list(result["removed_files"])
+        success = True
+        status_message = (
+            f"Restored the original proxy deferred relight color for '{mesh_obj.name}' "
+            f"({logical_splat_count:,} logical splats, SH degree {restored_sh_degree})."
+        )
+        print(status_message)
+    try:
+        main()
+    except Exception as exc:
+        success = False
+        status_message = f"Proxy deferred relight restore failed: {exc}"
+        print(status_message)
+        if raise_on_error:
+            raise
+
+
+def sna_relight2_0_save_original_3dgs_color_76EB6():
+    relight_cache_root = bpy.context.preferences.addons[__package__].preferences.sna_cache_file_directory
+    proxy_surface_relight_utils_path = os.path.join(os.path.dirname(__file__), 'assets', 'proxy_deferred_layers_utils.py')
+    proxy_binding_utils_path = os.path.join(os.path.dirname(__file__), 'assets', 'proxy_binding_utils.py')
+    # UI range note: "Soft" means the recommended Serpens slider range; "Hard" means the safe absolute clamp.
+    #proxy_surface_relight_utils_path = "D:/GithubRepos/3DGS Render_Render Updates/relighting/proxy_deferred_layers_v2_overlay_only/proxy_deferred_layers_utils.py"  # Input: full path to proxy_deferred_layers_utils.py. UI: path text, no numeric min/max.
+    #proxy_binding_utils_path = "D:/GithubRepos/3DGS Render_Render Updates/rigging/proxy_binding_utils.py"  # Input: full path to proxy_binding_utils.py. UI: path text, no numeric min/max.
+    #relight_cache_root = "D:/GithubRepos/3DGS Render_Render Updates/relighting"  # Input: optional folder for relight packages; blank = blend folder if saved, otherwise system temp. UI: folder path, no numeric min/max.
+    target_mode = "Active"  # Input: Active or Input Object. UI: enum, no numeric min/max.
+    target_obj = None  # Input: object pointer or object name. UI: show only when target_mode is Input Object; no numeric min/max.
+    overwrite_saved_state = False  # Input: True = replace any previously saved original color state. UI: boolean, hard False/True.
+    show_progress_overlay = True  # Input: True = show save progress in the viewport/status bar. UI: boolean, hard False/True.
+    raise_on_error = False  # Input: True = raise actual exceptions, False = fail softly. UI: boolean, hard False/True.
+    success = False
+    status_message = ""
+    target_object_name = ""
+    logical_splat_count = 0
+    sh_degree = 0
+    package_dir = ""
+
+    def load_utils():
+        module_path = str(proxy_surface_relight_utils_path).strip()
+        if not module_path:
+            raise RuntimeError("proxy_surface_relight_utils_path is blank.")
+        spec = importlib.util.spec_from_file_location(
+            "proxy_surface_relight_utils_runtime_save",
+            module_path,
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Could not load proxy_surface_relight_utils.py from '{module_path}'.")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def main():
+        global success
+        global status_message
+        global target_object_name
+        global logical_splat_count
+        global sh_degree
+        global package_dir
+        print("Saving original 3DGS color state for proxy deferred relighting layers...")
+        utils = load_utils()
+        mesh_obj = utils.resolve_target_mesh_object(
+            target_mode=target_mode,
+            target_obj=target_obj,
+            proxy_binding_utils_path=proxy_binding_utils_path,
+        )
+        progress_started = False
+        progress_end_message = ""
+        try:
+            if show_progress_overlay:
+                utils.begin_proxy_deferred_progress_overlay(
+                    total_steps=3,
+                    object_name=mesh_obj.name,
+                    title="Proxy Deferred Save Original",
+                )
+                progress_started = True
+                utils.update_proxy_deferred_progress_overlay(
+                    1,
+                    3,
+                    status_message="Reading current 3DGS color state...",
+                )
+            result = utils.save_original_color_state(
+                mesh_obj,
+                relight_cache_root=relight_cache_root,
+                overwrite_saved_state=overwrite_saved_state,
+                proxy_binding_utils_path=proxy_binding_utils_path,
+            )
+            if progress_started:
+                utils.update_proxy_deferred_progress_overlay(
+                    3,
+                    3,
+                    status_message="Saved original color state.",
+                )
+            progress_end_message = f"Finished saving original color for {mesh_obj.name}."
+        except Exception:
+            progress_end_message = f"Proxy deferred save failed for {mesh_obj.name}."
+            raise
+        finally:
+            if progress_started:
+                utils.end_proxy_deferred_progress_overlay(progress_end_message)
+        target_object_name = mesh_obj.name
+        logical_splat_count = int(result["logical_splat_count"])
+        sh_degree = int(result["sh_degree"])
+        package_dir = str(result["paths"]["package_dir"])
+        success = True
+        if result["already_saved"]:
+            status_message = (
+                f"Original proxy deferred relight color for '{mesh_obj.name}' was already saved. "
+                f"Package: {package_dir}"
+            )
+        else:
+            status_message = (
+                f"Saved original proxy deferred relight color for '{mesh_obj.name}' "
+                f"({logical_splat_count:,} logical splats, SH degree {sh_degree})."
+            )
+        print(status_message)
+    try:
+        main()
+    except Exception as exc:
+        success = False
+        status_message = f"Proxy deferred relight save failed: {exc}"
+        print(status_message)
+        if raise_on_error:
+            raise
+
+
+def sna_relight2_1_build_base_color_from_f_dc_BAE18():
+    relight_cache_root = bpy.context.preferences.addons[__package__].preferences.sna_cache_file_directory
+    proxy_surface_relight_utils_path = os.path.join(os.path.dirname(__file__), 'assets', 'proxy_deferred_layers_utils.py')
+    proxy_binding_utils_path = os.path.join(os.path.dirname(__file__), 'assets', 'proxy_binding_utils.py')
+    # UI range note: "Soft" means the recommended Serpens slider range; "Hard" means the safe absolute clamp.
+    #proxy_surface_relight_utils_path = "D:/GithubRepos/3DGS Render_Render Updates/relighting/proxy_deferred_layers_v2_overlay_only/proxy_deferred_layers_utils.py"  # Input: full path to proxy_deferred_layers_utils.py. UI: path text, no numeric min/max.
+    #proxy_binding_utils_path = "D:/GithubRepos/3DGS Render_Render Updates/rigging/proxy_binding_utils.py"  # Input: full path to proxy_binding_utils.py. UI: path text, no numeric min/max.
+    #relight_cache_root = "D:/GithubRepos/3DGS Render_Render Updates/relighting"  # Input: folder that stores the saved original proxy relight color packages. UI: folder path, no numeric min/max.
+    target_mode = "Active"  # Input: Active or Input Object. UI: enum, no numeric min/max.
+    target_obj = None  # Input: object pointer or object name. UI: show only when target_mode is Input Object; no numeric min/max.
+    base_color_source_mode = "Saved Original"  # Input: Current f_dc or Saved Original. UI: enum, no numeric min/max; Saved Original is recommended.
+    base_color_attr_name = "proxy_deferred_relight_base_color"  # Input: temp attribute name used for the base color layer. UI: text, no numeric min/max.
+    clamp_base_color = True  # Input: True = clamp f_dc RGB into 0-1 before storing it. UI: boolean, hard False/True.
+    show_progress_overlay = True  # Input: True = show base-color build progress in the viewport/status bar. UI: boolean, hard False/True.
+    debug_verbose = True  # Input: True = print detailed numeric debug info to the console. UI: boolean, hard False/True.
+    debug_sample_indices = "0,1,2,10,100,-1"  # Input: comma-separated logical splat indices to print as samples. UI: text, no numeric min/max.
+    raise_on_error = False  # Input: True = raise actual exceptions, False = fail softly. UI: boolean, hard False/True.
+    success = False
+    status_message = ""
+    target_object_name = ""
+    logical_splat_count = 0
+    mode_used = ""
+
+    def load_utils():
+        module_path = str(proxy_surface_relight_utils_path).strip()
+        if not module_path:
+            raise RuntimeError("proxy_surface_relight_utils_path is blank.")
+        spec = importlib.util.spec_from_file_location(
+            "proxy_surface_relight_utils_runtime_base",
+            module_path,
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Could not load proxy_surface_relight_utils.py from '{module_path}'.")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def main():
+        global success
+        global status_message
+        global target_object_name
+        global logical_splat_count
+        global mode_used
+        print("Building proxy deferred relight base color layer from f_dc (legacy helper; not required for the Save -> Bake -> Write workflow)...")
+        utils = load_utils()
+        mesh_obj = utils.resolve_target_mesh_object(
+            target_mode=target_mode,
+            target_obj=target_obj,
+            proxy_binding_utils_path=proxy_binding_utils_path,
+        )
+        progress_started = False
+        progress_end_message = ""
+        try:
+            if show_progress_overlay:
+                utils.begin_proxy_deferred_progress_overlay(
+                    total_steps=4,
+                    object_name=mesh_obj.name,
+                    title="Proxy Deferred Base Color",
+                )
+                progress_started = True
+                utils.update_proxy_deferred_progress_overlay(
+                    1,
+                    4,
+                    status_message="Reading f_dc color source...",
+                )
+            result = utils.build_base_color_from_f_dc(
+                mesh_obj,
+                base_color_attr_name=base_color_attr_name,
+                clamp_base_color=clamp_base_color,
+                source_mode=base_color_source_mode,
+                relight_cache_root=relight_cache_root,
+                proxy_binding_utils_path=proxy_binding_utils_path,
+            )
+            if progress_started:
+                utils.update_proxy_deferred_progress_overlay(
+                    4,
+                    4,
+                    status_message="Base color attribute written.",
+                )
+            progress_end_message = f"Finished base color build for {mesh_obj.name}."
+        except Exception:
+            progress_end_message = f"Proxy deferred base color build failed for {mesh_obj.name}."
+            raise
+        finally:
+            if progress_started:
+                utils.end_proxy_deferred_progress_overlay(progress_end_message)
+        target_object_name = mesh_obj.name
+        logical_splat_count = int(result["logical_splat_count"])
+        mode_used = str(result["mode"])
+        success = True
+        status_message = (
+            f"Built '{base_color_attr_name}' for '{mesh_obj.name}' "
+            f"({logical_splat_count:,} logical splats) from {mode_used}."
+        )
+        print(status_message)
+        if debug_verbose:
+            utils.debug_print_array_stats(
+                "f_dc_source_color",
+                result["source_color"],
+                value_kind="color",
+                sample_indices=debug_sample_indices,
+            )
+            utils.debug_print_array_stats(
+                "f_dc_coeffs",
+                result["f_dc_coeffs"],
+                value_kind="generic",
+                sample_indices=debug_sample_indices,
+            )
+            utils.debug_print_array_stats(
+                base_color_attr_name,
+                result["logical_color"],
+                value_kind="color",
+                sample_indices=debug_sample_indices,
+            )
+    try:
+        main()
+    except Exception as exc:
+        success = False
+        status_message = f"Proxy deferred relight base color build failed: {exc}"
+        print(status_message)
+        if raise_on_error:
+            raise
+
+
+def sna_relight2_2_build_proxy_hdri_relight_89C9C():
+    relight_cache_root = bpy.context.preferences.addons[__package__].preferences.sna_cache_file_directory
+    proxy_obj = bpy.context.view_layer.objects.active.sna_dgs_object_properties.rig_proxy_mesh
+    normal_smoothing = bpy.context.scene.sna_dgs_scene_properties.normal_smoothing
+    pre_light_smoothing = bpy.context.scene.sna_dgs_scene_properties.pre_light_smoothing
+    post_light_smoothing = bpy.context.scene.sna_dgs_scene_properties.post_light_smoothing
+    transfer_style = bpy.context.scene.sna_dgs_scene_properties.transfer_style
+    transfer_smoothness = bpy.context.scene.sna_dgs_scene_properties.transfer_smoothness
+    include_world_environment = bpy.context.scene.sna_dgs_scene_properties.relight_include_world_environment
+    include_scene_lights = bpy.context.scene.sna_dgs_scene_properties.relight_include_scene_lights
+    irradiance_resolution = bpy.context.scene.sna_dgs_scene_properties.irradiance_resolution
+    irradiance_blur_strength = bpy.context.scene.sna_dgs_scene_properties.irradiance_blur_strength
+    irradiance_luminance_clamp = bpy.context.scene.sna_dgs_scene_properties.irradiance_luminance_clamp
+    use_proxy_occlusion = bpy.context.scene.sna_dgs_scene_properties.use_proxy_occlusion
+    occlusion_sample_count = bpy.context.scene.sna_dgs_scene_properties.occlusion_sample_count
+    occlusion_bias = bpy.context.scene.sna_dgs_scene_properties.occlusion_bias
+    occlusion_max_distance = bpy.context.scene.sna_dgs_scene_properties.occlusion_max_distance
+    scene_light_gain = bpy.context.scene.sna_dgs_scene_properties.relight_scene_light_gain
+    include_hidden_lights = bpy.context.scene.sna_dgs_scene_properties.include_hidden_lights
+    use_light_shadows = bpy.context.scene.sna_dgs_scene_properties.relight_use_light_shadows
+    light_shadow_bias = bpy.context.scene.sna_dgs_scene_properties.light_shadow_bias
+    clamp_base_color = True
+    numeric_quality = 'Standard'
+    hdri_max_width = bpy.context.scene.sna_dgs_scene_properties.hdri_max_width
+    proxy_surface_relight_utils_path = os.path.join(os.path.dirname(__file__), 'assets', 'proxy_deferred_layers_utils.py')
+    proxy_binding_utils_path = os.path.join(os.path.dirname(__file__), 'assets', 'proxy_binding_utils.py')
+    # UI range note: "Soft" means the recommended Serpens slider range; "Hard" means the safe absolute clamp.
+    #proxy_surface_relight_utils_path = "D:/GithubRepos/3DGS Render_Render Updates/relighting/proxy_deferred_layers_v2_overlay_only/proxy_deferred_layers_utils.py"  # Input: full path to proxy_deferred_layers_utils.py. UI: path text, no numeric min/max.
+    #proxy_binding_utils_path = "D:/GithubRepos/3DGS Render_Render Updates/rigging/proxy_binding_utils.py"  # Input: full path to proxy_binding_utils.py. UI: path text, no numeric min/max.
+    #relight_cache_root = "D:/GithubRepos/3DGS Render_Render Updates/relighting"  # Input: folder that stores the saved original state and baked lighting cache. UI: folder path, no numeric min/max.
+    # ---------------------------------------------------------------------------
+    # Target 3DGS object
+    # ---------------------------------------------------------------------------
+    target_mode = "Active"  # Input: Active or Input Object. UI: enum, no numeric min/max.
+    target_obj = None  # Input: object pointer or object name. UI: show only when target_mode is Input Object; no numeric min/max.
+    # ---------------------------------------------------------------------------
+    # Base color source
+    # This is the color being lit. Saved Original is the recommended default.
+    # ---------------------------------------------------------------------------
+    base_color_source_mode = "Saved Original"  # Input: Saved Original or Current f_dc. UI: enum, no numeric min/max; Saved Original is recommended.
+    clamp_base_color = True  # Input: True = clamp base RGB into 0-1 before caching it. UI: boolean, hard False/True.
+    # ---------------------------------------------------------------------------
+    # Proxy source
+    # ---------------------------------------------------------------------------
+    #proxy_obj = None  # Input: proxy mesh object pointer or object name; blank = use the bound proxy mesh automatically. UI: object picker/text, no numeric min/max.
+    use_evaluated_proxy = True  # Input: True = use the evaluated proxy mesh (mods/armature/GN result), False = use the raw proxy mesh data. UI: boolean, hard False/True.
+    #normal_smoothing = 0.0  # Input: 0 = use proxy normals as-is, 1 = heavily smooth proxy normals before lighting. UI: soft 0.0-0.5, hard 0.0-1.0.
+    #pre_light_smoothing = 0.0  # Input: 0 = use raw proxy-vertex lighting, 1 = strongly smooth proxy lighting before transfer. UI: soft 0.0-0.5, hard 0.0-1.0.
+    #post_light_smoothing = 0.0  # Input: 0 = keep transferred lighting detail, 1 = strongly smooth the transferred light cache. UI: soft 0.0-0.5, hard 0.0-1.0.
+    #transfer_style = "Accurate"  # Input: Accurate, Balanced, or Smooth. UI: enum, no numeric min/max.
+    #transfer_smoothness = 0.5  # Input: extra smoothing amount used by Balanced and Smooth transfer styles. UI: show only when transfer_style is Balanced or Smooth; soft 0.0-1.0, hard 0.0-1.0.
+    # ---------------------------------------------------------------------------
+    # Relight sources
+    # ---------------------------------------------------------------------------
+    #include_world_environment = True  # Input: True = include the active World / HDRI contribution. UI: boolean, hard False/True.
+    #include_scene_lights = True  # Input: True = include Blender Sun / Point / Spot / Area lights. UI: boolean, hard False/True.
+    # ---------------------------------------------------------------------------
+    # World / HDRI source
+    # Only matters when include_world_environment is True.
+    # hdri_image_path blank = use the active World setup from the current scene.
+    # ---------------------------------------------------------------------------
+    hdri_image_path = ""  # Input: world HDRI image path or Blender image name; blank = use the active world setup. UI: show only when include_world_environment is True; path/text, no numeric min/max.
+    environment_rotation_degrees = 0.0  # Input: extra manual rotation added on top of the active world mapping rotation. UI: show only when include_world_environment is True; soft -180 to 180, hard -1080 to 1080.
+    #irradiance_resolution = 32  # Input: irradiance map height in pixels; width is doubled automatically. UI: show only when include_world_environment is True; soft 8-128, hard 4-512.
+    #irradiance_blur_strength = 8  # Input: extra blur passes applied to the irradiance map. UI: show only when include_world_environment is True; soft 0-16, hard 0-64.
+    #irradiance_luminance_clamp = 10.0  # Input: clamp hot HDRI pixels before building the irradiance map; 0 = off. UI: show only when include_world_environment is True; soft 0.0-20.0, hard 0.0-1000.0.
+    # ---------------------------------------------------------------------------
+    # World / HDRI occlusion
+    # These affect the baked lighting cache itself, so changes here require a rebake.
+    # ---------------------------------------------------------------------------
+    #use_proxy_occlusion = True  # Input: True = approximate HDRI shadowing / AO by ray-casting the proxy mesh. UI: show only when include_world_environment is True; boolean, hard False/True.
+    #occlusion_sample_count = 6  # Input: hemisphere rays per proxy sample when use_proxy_occlusion is enabled. UI: show only when use_proxy_occlusion is True; soft 1-16, hard 1-128.
+    #occlusion_bias = 0.002  # Input: world-space offset for proxy-occlusion rays. UI: show only when use_proxy_occlusion is True; soft 0.0-0.02, hard 0.0-1.0.
+    #occlusion_max_distance = 0.0  # Input: 0 = infinite AO/shadow ray distance; otherwise clamp to this world-space distance. UI: show only when use_proxy_occlusion is True; soft 0.0-2.0, hard 0.0-100.0.
+    # ---------------------------------------------------------------------------
+    # Scene lights
+    # These affect the baked lighting cache itself, so changes here require a rebake.
+    # ---------------------------------------------------------------------------
+    #scene_light_gain = 1.0  # Input: overall multiplier applied while baking Blender light-object contribution. UI: show only when include_scene_lights is True; soft 0.0-4.0, hard 0.0-100.0.
+    #include_hidden_lights = False  # Input: True = include hidden light objects as contributors. UI: show only when include_scene_lights is True; boolean, hard False/True.
+    #use_light_shadows = True  # Input: True = ray-cast proxy self-shadowing for direct light objects. UI: show only when include_scene_lights is True; boolean, hard False/True.
+    #light_shadow_bias = 0.002  # Input: world-space offset for direct-light shadow rays. UI: show only when use_light_shadows is True; soft 0.0-0.02, hard 0.0-1.0.
+    # ---------------------------------------------------------------------------
+    # Debug / error handling
+    # ---------------------------------------------------------------------------
+    show_progress_overlay = True  # Input: True = show bake progress in the viewport/status bar. UI: boolean, hard False/True.
+    debug_verbose = True  # Input: True = print detailed numeric debug info to the console. UI: boolean, hard False/True.
+    debug_sample_indices = "0,1,2,10,100,-1"  # Input: comma-separated logical splat indices to print as samples. UI: text, no numeric min/max.
+    raise_on_error = False  # Input: True = raise actual exceptions, False = fail softly. UI: boolean, hard False/True.
+    success = False
+    status_message = ""
+    target_object_name = ""
+    proxy_object_name = ""
+    logical_splat_count = 0
+    environment_image_name = ""
+    cache_package_dir = ""
+
+    def load_utils():
+        module_path = str(proxy_surface_relight_utils_path).strip()
+        if not module_path:
+            raise RuntimeError("proxy_surface_relight_utils_path is blank.")
+        spec = importlib.util.spec_from_file_location(
+            "proxy_deferred_layers_utils_runtime_build",
+            module_path,
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Could not load proxy_deferred_layers_utils.py from '{module_path}'.")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def main():
+        global success
+        global status_message
+        global target_object_name
+        global proxy_object_name
+        global logical_splat_count
+        global environment_image_name
+        global cache_package_dir
+        print("Building proxy deferred relight bake cache...")
+        utils = load_utils()
+        mesh_obj = utils.resolve_target_mesh_object(
+            target_mode=target_mode,
+            target_obj=target_obj,
+            proxy_binding_utils_path=proxy_binding_utils_path,
+        )
+        progress_started = False
+        progress_end_message = ""
+        try:
+            if show_progress_overlay:
+                utils.begin_proxy_deferred_progress_overlay(
+                    total_steps=13,
+                    object_name=mesh_obj.name,
+                    title="Proxy Deferred Relight Bake",
+                )
+                progress_started = True
+            result = utils.build_proxy_lighting_layers(
+                mesh_obj,
+                proxy_obj=proxy_obj,
+                hdri_image_path=hdri_image_path,
+                base_color_source_mode=base_color_source_mode,
+                clamp_base_color=clamp_base_color,
+                use_evaluated_proxy=use_evaluated_proxy,
+                normal_smoothing=normal_smoothing,
+                pre_light_smoothing=pre_light_smoothing,
+                post_light_smoothing=post_light_smoothing,
+                transfer_style=transfer_style,
+                transfer_smoothness=transfer_smoothness,
+                include_world_environment=include_world_environment,
+                include_scene_lights=include_scene_lights,
+                scene_light_gain=scene_light_gain,
+                use_light_shadows=use_light_shadows,
+                include_hidden_lights=include_hidden_lights,
+                use_proxy_occlusion=use_proxy_occlusion,
+                occlusion_sample_count=occlusion_sample_count,
+                occlusion_bias=occlusion_bias,
+                occlusion_max_distance=occlusion_max_distance,
+                light_shadow_bias=light_shadow_bias,
+                environment_rotation_degrees=environment_rotation_degrees,
+                irradiance_resolution=irradiance_resolution,
+                irradiance_blur_strength=irradiance_blur_strength,
+                irradiance_luminance_clamp=irradiance_luminance_clamp,
+                relight_cache_root=relight_cache_root,
+                proxy_binding_utils_path=proxy_binding_utils_path,
+                progress_callback=utils.update_proxy_deferred_progress_overlay if show_progress_overlay else None,
+            )
+            progress_end_message = f"Finished baking lighting cache for {mesh_obj.name}."
+        except Exception:
+            progress_end_message = f"Proxy deferred relight bake failed for {mesh_obj.name}."
+            raise
+        finally:
+            if progress_started:
+                utils.end_proxy_deferred_progress_overlay(progress_end_message)
+        target_object_name = mesh_obj.name
+        proxy_object_name = str(result["proxy_name"])
+        logical_splat_count = int(result["logical_splat_count"])
+        environment_image_name = str(result["image_name"])
+        cache_package_dir = str(result["cache_package_dir"])
+        success = True
+        status_message = (
+            f"Built proxy deferred relight bake cache for '{mesh_obj.name}' "
+            f"({logical_splat_count:,} logical splats) from proxy '{proxy_object_name}'. "
+            f"Cache package: {cache_package_dir}"
+        )
+        print(status_message)
+        if debug_verbose:
+            print(
+                f"[PROXY DEFERRED DEBUG] image size={result['image_size'][0]}x{result['image_size'][1]} "
+                f"strength={result['image_strength']:.6f} "
+                f"tint=({result['image_tint'][0]:.6f}, {result['image_tint'][1]:.6f}, {result['image_tint'][2]:.6f}) "
+                f"color_space={result['image_color_space']} "
+                f"is_float={result['image_is_float']} "
+                f"world='{result['world_name']}' "
+                f"world_rotation_degrees={result['world_rotation_degrees']:.6f} "
+                f"total_rotation_degrees={result['total_rotation_degrees']:.6f}"
+            )
+            print(
+                f"[PROXY DEFERRED DEBUG] irradiance map size={result['irradiance_image_size'][0]}x{result['irradiance_image_size'][1]} "
+                f"base_color_source_mode={result['base_color_source_mode']} "
+                f"proxy_interpolation_mode={result['proxy_interpolation_mode']} "
+                f"normal_smoothing={result['normal_smoothing']:.3f} "
+                f"pre_light_smoothing={result['pre_light_smoothing']:.3f} "
+                f"post_light_smoothing={result['post_light_smoothing']:.3f} "
+                f"transfer_style={result['transfer_style']} "
+                f"transfer_smoothness={result['transfer_smoothness']:.3f} "
+                f"transfer_blend={result['transfer_smoothness_blend']:.3f}"
+            )
+            print(
+                f"[PROXY DEFERRED DEBUG] world vector nodes={result['vector_node_types']} "
+                f"unsupported_vector_nodes={result['unsupported_vector_nodes']}"
+            )
+            print(
+                f"[PROXY DEFERRED DEBUG] world color nodes={result['color_node_types']} "
+                f"unsupported_color_nodes={result['unsupported_color_nodes']}"
+            )
+            print(
+                f"[PROXY DEFERRED DEBUG] cache files: state='{result['cache_state_path']}' "
+                f"metadata='{result['cache_metadata_path']}'"
+            )
+            utils.debug_print_array_stats(
+                "base_color_cache",
+                result["base_color"],
+                value_kind="color",
+                sample_indices=debug_sample_indices,
+            )
+            utils.debug_print_array_stats(
+                "proxy_vertex_normals_for_lighting",
+                result["proxy_vertex_normals_for_lighting"],
+                value_kind="generic",
+                sample_indices=debug_sample_indices,
+            )
+            utils.debug_print_array_stats(
+                "indirect_light_raw",
+                result["indirect_color"],
+                value_kind="color",
+                sample_indices=debug_sample_indices,
+            )
+            utils.debug_print_array_stats(
+                "direct_light_raw",
+                result["direct_color"],
+                value_kind="color",
+                sample_indices=debug_sample_indices,
+            )
+            utils.debug_print_array_stats(
+                "shadow_factor",
+                result["shadow_factor"],
+                value_kind="scalar",
+                sample_indices=debug_sample_indices,
+            )
+            utils.debug_print_array_stats(
+                "occlusion_factor",
+                result["occlusion_factor"],
+                value_kind="scalar",
+                sample_indices=debug_sample_indices,
+            )
+            utils.debug_print_array_stats(
+                "proxy_surface_distance",
+                result["surface_distances"],
+                value_kind="scalar",
+                sample_indices=debug_sample_indices,
+            )
+    try:
+        main()
+    except Exception as exc:
+        success = False
+        status_message = f"Proxy deferred relight bake failed: {exc}"
+        print(status_message)
+        if raise_on_error:
+            raise
+
+
+def sna_relight2_3_commit_proxy_relight_to_3dgs_6E60F():
+    relight_cache_root = bpy.context.preferences.addons[__package__].preferences.sna_cache_file_directory
+    indirect_strength = bpy.context.scene.sna_dgs_scene_properties.indirect_strength
+    direct_strength = bpy.context.scene.sna_dgs_scene_properties.direct_strength
+    occlusion_strength = bpy.context.scene.sna_dgs_scene_properties.occlusion_strength
+    shadow_strength = bpy.context.scene.sna_dgs_scene_properties.shadow_strength
+    lighting_factor_mode = bpy.context.scene.sna_dgs_scene_properties.relight_lighting_factor_mode
+    factor_curve_mode = bpy.context.scene.sna_dgs_scene_properties.relight_factor_curve_mode
+    colorize_mix = bpy.context.scene.sna_dgs_scene_properties.relight_colorize_mix
+    max_color_tint = bpy.context.scene.sna_dgs_scene_properties.relight_max_color_tint
+    ambient_floor = bpy.context.scene.sna_dgs_scene_properties.ambient_floor
+    light_gain = bpy.context.scene.sna_dgs_scene_properties.light_gain
+    light_power = bpy.context.scene.sna_dgs_scene_properties.light_power
+    max_light_factor = bpy.context.scene.sna_dgs_scene_properties.max_light_factor
+    sh_mode = bpy.context.scene.sna_dgs_scene_properties.export_mode
+    original_sh_strength = bpy.context.scene.sna_dgs_scene_properties.directionality_strength
+    clamp_relight_color = True
+    max_color_tint_mode = bpy.context.scene.sna_dgs_scene_properties.max_color_tint_mode
+    proxy_surface_relight_utils_path = os.path.join(os.path.dirname(__file__), 'assets', 'proxy_deferred_layers_utils.py')
+    proxy_binding_utils_path = os.path.join(os.path.dirname(__file__), 'assets', 'proxy_binding_utils.py')
+    # UI range note: "Soft" means the recommended Serpens slider range; "Hard" means the safe absolute clamp.
+    #proxy_surface_relight_utils_path = "D:/GithubRepos/3DGS Render_Render Updates/relighting/proxy_deferred_layers_v2_overlay_only/proxy_deferred_layers_utils.py"  # Input: full path to proxy_deferred_layers_utils.py. UI: path text, no numeric min/max.
+    #proxy_binding_utils_path = "D:/GithubRepos/3DGS Render_Render Updates/rigging/proxy_binding_utils.py"  # Input: full path to proxy_binding_utils.py. UI: path text, no numeric min/max.
+    #relight_cache_root = "D:/GithubRepos/3DGS Render_Render Updates/relighting"  # Input: folder that stores the saved original state and baked lighting cache. UI: folder path, no numeric min/max.
+    target_mode = "Active"  # Input: Active or Input Object. UI: enum, no numeric min/max.
+    target_obj = None  # Input: object pointer or object name. UI: show only when target_mode is Input Object; no numeric min/max.
+    # ---------------------------------------------------------------------------
+    # Cheap composition controls
+    # These do not reread the world or proxy. They only remix the baked cache.
+    # ---------------------------------------------------------------------------
+    #indirect_strength = 1.0  # Input: overall strength of the baked indirect / HDRI fill. UI: soft 0.0-2.0, hard 0.0-20.0.
+    #direct_strength = 1.0  # Input: overall strength of the baked direct light contribution. UI: soft 0.0-2.0, hard 0.0-20.0.
+    #occlusion_strength = 0.7  # Input: 0 = ignore baked occlusion, 1 = use baked occlusion fully. UI: soft 0.0-1.0, hard 0.0-1.0.
+    #shadow_strength = 1.0  # Input: 0 = ignore baked direct-light shadowing, 1 = use baked shadowing fully. UI: soft 0.0-1.0, hard 0.0-1.0.
+    #lighting_factor_mode = "Tinted Luminance"  # Input: Luminance, Tinted Luminance, or RGB. UI: enum, no numeric min/max.
+    #factor_curve_mode = "Reinhard"  # Input: Reinhard or Linear. UI: enum, no numeric min/max.
+    #colorize_mix = 0.20  # Input: 0 = preserve original base hue, 1 = stronger light color tinting. UI: soft 0.0-0.5, hard 0.0-1.0.
+    #max_color_tint = 2.0  # Input: clamp for per-channel light tint. UI: show only when lighting_factor_mode is Tinted Luminance; soft 1.0-3.0, hard 0.0-10.0.
+    # Perceived Brightness = original method; limiting RGB tint can also change visible brightness.
+    # Preserve Luminance = limits color cast while keeping the tint's numeric luminance at 1.0; values below 1.0 are treated as 1.0.
+    #max_color_tint_mode = "Perceived Brightness"  # Input: Perceived Brightness or Preserve Luminance. UI: show only when lighting_factor_mode is Tinted Luminance; enum, no numeric min/max.
+    #ambient_floor = 0.08  # Input: minimum ambient light factor before multiplying the base color. UI: soft 0.0-0.3, hard 0.0-2.0.
+    #light_gain = 0.85  # Input: overall light factor multiplier. UI: soft 0.0-2.0, hard 0.0-20.0.
+    #light_power = 0.75  # Input: contrast/power applied to the normalized light factor. UI: soft 0.25-2.0, hard 0.01-8.0.
+    #max_light_factor = 1.75  # Input: clamp for the final light factor to avoid blow-outs. UI: soft 0.5-4.0, hard 0.0-100.0.
+    # ---------------------------------------------------------------------------
+    # 3DGS SH export / write mode
+    # - "Flatten SH": writes the relit color into f_dc and sets f_rest / higher-order SH to 0.
+    # - "Preserve Original SH": writes the relit color into f_dc and restores the saved original f_rest at full strength.
+    # - "Dampen Original SH": writes the relit color into f_dc and restores the saved original f_rest multiplied by original_sh_strength.
+    # ---------------------------------------------------------------------------
+    #sh_mode = "Flatten SH"  # Input: Flatten SH, Preserve Original SH, or Dampen Original SH. UI: enum, no numeric min/max.
+    #original_sh_strength = 0.25  # Input: only used by Dampen Original SH; 0 = flattened f_rest SH, 1 = full saved original f_rest SH. UI: show only for Dampen Original SH; soft 0.0-0.5, hard 0.0-1.0.
+    #clamp_relight_color = True  # Input: True = clamp final RGB to 0-1 before writing f_dc. UI: boolean, hard False/True.
+    # ---------------------------------------------------------------------------
+    # Debug / error handling
+    # ---------------------------------------------------------------------------
+    show_progress_overlay = True  # Input: True = show write/commit progress in the viewport/status bar. UI: boolean, hard False/True.
+    debug_verbose = True  # Input: True = print detailed numeric debug info to the console. UI: boolean, hard False/True.
+    debug_sample_indices = "0,1,2,10,100,-1"  # Input: comma-separated logical splat indices to print as samples. UI: text, no numeric min/max.
+    raise_on_error = False  # Input: True = raise actual exceptions, False = fail softly. UI: boolean, hard False/True.
+    success = False
+    status_message = ""
+    target_object_name = ""
+    logical_splat_count = 0
+    resolved_export_mode = ""
+    bake_package_dir = ""
+
+    def load_utils():
+        module_path = str(proxy_surface_relight_utils_path).strip()
+        if not module_path:
+            raise RuntimeError("proxy_surface_relight_utils_path is blank.")
+        spec = importlib.util.spec_from_file_location(
+            "proxy_deferred_layers_utils_runtime_commit",
+            module_path,
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Could not load proxy_deferred_layers_utils.py from '{module_path}'.")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def resolve_utility_sh_settings(mode_name, strength):
+        compact = "".join(
+            ch for ch in str(mode_name).strip().lower().replace("_", " ") if ch.isalnum()
+        )
+        if compact in (
+            "",
+            "compatible",
+            "flat",
+            "flatten",
+            "flattensh",
+            "zerosh",
+            "zerofrest",
+            "zerofrestsh",
+            "fdconly",
+            "fdconlyzerofrest",
+            "fdconlyzerofrestsh",
+        ):
+            return "Flatten SH", 0.0
+        if compact in (
+            "preserveoriginalsh",
+            "restoreoriginalsh",
+            "useoriginalsh",
+            "originalsh",
+            "preservesavedsh",
+            "restoresavedsh",
+        ):
+            return "Preserve Original SH", 1.0
+        if compact in (
+            "dampensavedoriginaldirectionality",
+            "savedoriginaldirectionality",
+            "dampedoriginal",
+            "enhanced",
+            "dampenoriginalsh",
+            "dampensavedsh",
+            "dampensavedoriginalsh",
+            "fdcsavedoriginalfrestdamped",
+            "fdcsavedoriginalfrestshdamped",
+        ):
+            return "Dampen Original SH", strength
+        return str(mode_name), strength
+
+    def main():
+        global success
+        global status_message
+        global target_object_name
+        global logical_splat_count
+        global resolved_export_mode
+        global bake_package_dir
+        print("Committing proxy deferred relight baked cache back into the real 3DGS attributes...")
+        utils = load_utils()
+        mesh_obj = utils.resolve_target_mesh_object(
+            target_mode=target_mode,
+            target_obj=target_obj,
+            proxy_binding_utils_path=proxy_binding_utils_path,
+        )
+        resolved_sh_export_mode, resolved_sh_strength = resolve_utility_sh_settings(
+            sh_mode,
+            original_sh_strength,
+        )
+        progress_started = False
+        progress_end_message = ""
+        try:
+            if show_progress_overlay:
+                utils.begin_proxy_deferred_progress_overlay(
+                    total_steps=6,
+                    object_name=mesh_obj.name,
+                    title="Proxy Deferred Relight Write",
+                )
+                progress_started = True
+                utils.update_proxy_deferred_progress_overlay(
+                    1,
+                    6,
+                    status_message="Loading baked lighting cache...",
+                )
+            result = utils.commit_composed_color_to_3dgs(
+                mesh_obj,
+                indirect_strength=indirect_strength,
+                direct_strength=direct_strength,
+                occlusion_strength=occlusion_strength,
+                shadow_strength=shadow_strength,
+                lighting_factor_mode=lighting_factor_mode,
+                factor_curve_mode=factor_curve_mode,
+                colorize_mix=colorize_mix,
+                max_color_tint=max_color_tint,
+                max_color_tint_mode=max_color_tint_mode,
+                ambient_floor=ambient_floor,
+                light_gain=light_gain,
+                light_power=light_power,
+                max_light_factor=max_light_factor,
+                export_mode=resolved_sh_export_mode,
+                directionality_strength=resolved_sh_strength,
+                clamp_relight_color=clamp_relight_color,
+                relight_cache_root=relight_cache_root,
+                proxy_binding_utils_path=proxy_binding_utils_path,
+            )
+            if progress_started:
+                utils.update_proxy_deferred_progress_overlay(
+                    6,
+                    6,
+                    status_message="Composed color written to 3DGS attributes.",
+                )
+            progress_end_message = f"Finished writing relit color for {mesh_obj.name}."
+        except Exception:
+            progress_end_message = f"Proxy deferred relight write failed for {mesh_obj.name}."
+            raise
+        finally:
+            if progress_started:
+                utils.end_proxy_deferred_progress_overlay(progress_end_message)
+        target_object_name = mesh_obj.name
+        logical_splat_count = int(result["logical_splat_count"])
+        resolved_export_mode = str(result["resolved_export_mode"])
+        bake_package_dir = str(result["bake_package_dir"])
+        success = True
+        status_message = (
+            f"Committed baked proxy deferred relight cache to '{mesh_obj.name}' "
+            f"({logical_splat_count:,} logical splats) using export mode '{resolved_export_mode}'. "
+            f"clamp_relight_color={bool(result['clamped'])}."
+        )
+        print(status_message)
+        if debug_verbose:
+            print(
+                f"[PROXY DEFERRED DEBUG] clamp stats before commit: "
+                f"below_zero={float(result['clipped_low_pct']):.3f}% "
+                f"above_one={float(result['clipped_high_pct']):.3f}% "
+                f"mean_luminance={float(result['mean_luminance']):.6f} "
+                f"reference_mean_luminance={float(result['reference_mean_luminance']):.6f} "
+                f"indirect_mean={float(result['indirect_base_mean_luminance']):.6f} "
+                f"direct_mean={float(result['direct_base_mean_luminance']):.6f} "
+                f"source_strength_sum={float(result['source_strength_sum']):.6f} "
+                f"factor_mode={result['factor_mode']} "
+                f"factor_curve_mode={result['factor_curve_mode']} "
+                f"max_color_tint_mode={result['max_color_tint_mode']}"
+            )
+            print(
+                f"[PROXY DEFERRED DEBUG] bake package='{bake_package_dir}' "
+                f"baked_at='{result['bake_metadata'].get('baked_at_utc', '')}' "
+                f"base_color_source='{result['bake_metadata'].get('base_color_source_mode', '')}'"
+            )
+            utils.debug_print_array_stats(
+                "base_color_cache",
+                result["base_color"],
+                value_kind="color",
+                sample_indices=debug_sample_indices,
+            )
+            utils.debug_print_array_stats(
+                "indirect_light_raw",
+                result["indirect_color_raw"],
+                value_kind="color",
+                sample_indices=debug_sample_indices,
+            )
+            utils.debug_print_array_stats(
+                "direct_light_raw",
+                result["direct_color_raw"],
+                value_kind="color",
+                sample_indices=debug_sample_indices,
+            )
+            utils.debug_print_array_stats(
+                "occlusion_factor",
+                result["occlusion_factor"],
+                value_kind="scalar",
+                sample_indices=debug_sample_indices,
+            )
+            utils.debug_print_array_stats(
+                "shadow_factor",
+                result["shadow_factor"],
+                value_kind="scalar",
+                sample_indices=debug_sample_indices,
+            )
+            utils.debug_print_array_stats(
+                "shaded_indirect",
+                result["shaded_indirect"],
+                value_kind="color",
+                sample_indices=debug_sample_indices,
+            )
+            utils.debug_print_array_stats(
+                "shaded_direct",
+                result["shaded_direct"],
+                value_kind="color",
+                sample_indices=debug_sample_indices,
+            )
+            utils.debug_print_array_stats(
+                "light_tint_color",
+                result["light_tint_color"],
+                value_kind="color",
+                sample_indices=debug_sample_indices,
+            )
+            utils.debug_print_array_stats(
+                "light_factor_scalar",
+                result["light_factor_scalar"],
+                value_kind="scalar",
+                sample_indices=debug_sample_indices,
+            )
+            utils.debug_print_array_stats(
+                "light_factor_rgb",
+                result["light_factor_rgb"],
+                value_kind="color",
+                sample_indices=debug_sample_indices,
+            )
+            utils.debug_print_array_stats(
+                "final_color_before_clamp",
+                result["relit_color_before_clamp"],
+                value_kind="color",
+                sample_indices=debug_sample_indices,
+            )
+            utils.debug_print_array_stats(
+                "final_color_after_clamp",
+                result["relit_color_after_clamp"],
+                value_kind="color",
+                sample_indices=debug_sample_indices,
+            )
+            utils.debug_print_array_stats(
+                "committed_f_dc_coeffs",
+                result["new_dc_coeffs"],
+                value_kind="generic",
+                sample_indices=debug_sample_indices,
+            )
+    try:
+        main()
+    except Exception as exc:
+        success = False
+        status_message = f"Proxy deferred relight commit failed: {exc}"
+        print(status_message)
+        if raise_on_error:
+            raise
+
+
+class SNA_OT_Dgs_Render_Apply_Light_Data_6C5Ad(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_apply_light_data_6c5ad"
+    bl_label = "3DGS Render: Apply Light Data"
+    bl_description = ""
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        sna_relight2_3_commit_proxy_relight_to_3dgs_6E60F()
+        sna_relight_5__create_col_and_vertex_paint_2AE5F()
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+def sna_relight_5__create_col_and_vertex_paint_2AE5F():
+    import numpy as np
+    # Constants from your script
+    SH_0 = 0.28209479177387814
+    # Get the active object
+    obj = bpy.context.active_object
+    if not obj or obj.type != 'MESH':
+        print("Error: No active mesh object selected.")
+    else:
+        # Get the mesh data
+        mesh = obj.data
+        # Check if the required attributes exist
+        if not all(attr.name in mesh.attributes for attr in mesh.attributes if attr.name in ['f_dc_0', 'f_dc_1', 'f_dc_2', 'opacity']):
+            print("Error: Required attributes (f_dc_0, f_dc_1, f_dc_2, opacity) not found on the mesh.")
+        else:
+            # Get the number of points (vertices)
+            point_count = len(mesh.vertices)
+            expected_length = point_count * 4  # Each point has 1 RGBA set (4 values) for both Col and KIRI_3DGS_Paint
+            # Extract data from attributes (assuming they are on POINT domain)
+            f_dc_0_data = np.array([v.value for v in mesh.attributes['f_dc_0'].data])
+            f_dc_1_data = np.array([v.value for v in mesh.attributes['f_dc_1'].data])
+            f_dc_2_data = np.array([v.value for v in mesh.attributes['f_dc_2'].data])
+            opacity_data = np.array([v.value for v in mesh.attributes['opacity'].data])
+            # Debug: Check lengths of input attribute data
+            print(f"Number of points (vertices): {point_count}")
+            print(f"Length of f_dc_0_data: {len(f_dc_0_data)}")
+            print(f"Length of f_dc_1_data: {len(f_dc_1_data)}")
+            print(f"Length of f_dc_2_data: {len(f_dc_2_data)}")
+            print(f"Length of opacity_data: {len(opacity_data)}")
+            # Verify that attribute data lengths match the number of points
+            if not (len(f_dc_0_data) == len(f_dc_1_data) == len(f_dc_2_data) == len(opacity_data) == point_count):
+                print("Error: Mismatch in attribute data lengths. Expected length matches point_count.")
+            else:
+                # Calculate RGB and Alpha for each point (same calculation for both Col and KIRI_3DGS_Paint)
+                color_data = []  # For both Col and KIRI_3DGS_Paint, one RGBA per point
+                for i in range(point_count):
+                    # Calculate RGB (matching your script)
+                    R = (f_dc_0_data[i] * SH_0 + 0.5)
+                    G = (f_dc_1_data[i] * SH_0 + 0.5)
+                    B = (f_dc_2_data[i] * SH_0 + 0.5)
+                    # Calculate Alpha (using sigmoid if opacity is in log-space, or raw if [0, 1])
+                    # Here, we assume opacity is in log-space (logits) as in your script
+                    log_opacity = opacity_data[i]
+                    A = 1 / (1 + np.exp(-log_opacity))
+                    # Ensure values are in [0, 1]
+                    R = max(0.0, min(1.0, R))
+                    G = max(0.0, min(1.0, G))
+                    B = max(0.0, min(1.0, B))
+                    A = max(0.0, min(1.0, A))
+                    # Add RGBA for both Col and KIRI_3DGS_Paint (one set per point)
+                    color_data.extend([R, G, B, A])
+                # Debug: Check calculated data length
+                print(f"Length of color_data (Col and KIRI_3DGS_Paint): {len(color_data)}")
+                print(f"Expected length for POINT domain: {expected_length}")
+                # Verify data length matches expectation
+                if len(color_data) != expected_length:
+                    print(f"Error: Array length mismatch (expected {expected_length}, got {len(color_data)})")
+                else:
+                    # Create or update the Col attribute on the point domain
+                    if 'Col' in mesh.attributes:
+                        mesh.attributes.remove(mesh.attributes['Col'])
+                    col_attr = mesh.attributes.new(name="Col", type='FLOAT_COLOR', domain='POINT')
+                    col_attr.data.foreach_set("color", color_data)
+                    # Create or update the KIRI_3DGS_Paint attribute on the point domain
+                    if 'KIRI_3DGS_Paint' in mesh.attributes:
+                        mesh.attributes.remove(mesh.attributes['KIRI_3DGS_Paint'])
+                    paint_attr = mesh.attributes.new(name="KIRI_3DGS_Paint", type='FLOAT_COLOR', domain='POINT')
+                    paint_attr.data.foreach_set("color", color_data)
+                    # Set KIRI_3DGS_Paint as the active color attribute
+                    mesh.color_attributes.active_color = paint_attr
+                    print(f"Created Col attribute on {obj.name} with {point_count} points.")
+                    print(f"Created KIRI_3DGS_Paint attribute on {obj.name} with {point_count} color values on the POINT domain.")
+
+
+def sna_light_bake_8F346(layout_function, ):
+    if (bpy.context.preferences.addons[__package__].preferences.sna_cache_file_directory == ''):
+        box_923B8 = layout_function.box()
+        box_923B8.alert = False
+        box_923B8.enabled = True
+        box_923B8.active = True
+        box_923B8.use_property_split = False
+        box_923B8.use_property_decorate = False
+        box_923B8.alignment = 'Expand'.upper()
+        box_923B8.scale_x = 1.0
+        box_923B8.scale_y = 1.0
+        if not True: box_923B8.operator_context = "EXEC_DEFAULT"
+        box_923B8.label(text='Cache directory is empty.', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+        box_923B8.label(text='Set it in Preferences', icon_value=0)
+    col_3F618 = layout_function.column(heading='', align=True)
+    col_3F618.alert = False
+    col_3F618.enabled = (bpy.context.preferences.addons[__package__].preferences.sna_cache_file_directory != '')
+    col_3F618.active = True
+    col_3F618.use_property_split = False
+    col_3F618.use_property_decorate = False
+    col_3F618.scale_x = 1.0
+    col_3F618.scale_y = 1.0
+    col_3F618.alignment = 'Expand'.upper()
+    col_3F618.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+    if (bpy.context.view_layer.objects.active == None):
+        box_C7AE0 = col_3F618.box()
+        box_C7AE0.alert = False
+        box_C7AE0.enabled = True
+        box_C7AE0.active = True
+        box_C7AE0.use_property_split = False
+        box_C7AE0.use_property_decorate = False
+        box_C7AE0.alignment = 'Expand'.upper()
+        box_C7AE0.scale_x = 1.0
+        box_C7AE0.scale_y = 2.0
+        if not True: box_C7AE0.operator_context = "EXEC_DEFAULT"
+        box_C7AE0.label(text='No Active Object', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+    else:
+        if '3DGS_Mesh_Type' in bpy.context.view_layer.objects.active:
+            col_9A00F = col_3F618.column(heading='', align=False)
+            col_9A00F.alert = False
+            col_9A00F.enabled = True
+            col_9A00F.active = True
+            col_9A00F.use_property_split = False
+            col_9A00F.use_property_decorate = False
+            col_9A00F.scale_x = 1.0
+            col_9A00F.scale_y = 1.0
+            col_9A00F.alignment = 'Expand'.upper()
+            col_9A00F.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+            box_18E8E = col_9A00F.box()
+            box_18E8E.alert = False
+            box_18E8E.enabled = True
+            box_18E8E.active = True
+            box_18E8E.use_property_split = False
+            box_18E8E.use_property_decorate = False
+            box_18E8E.alignment = 'Expand'.upper()
+            box_18E8E.scale_x = 1.0
+            box_18E8E.scale_y = 1.0
+            if not True: box_18E8E.operator_context = "EXEC_DEFAULT"
+            box_18E8E.label(text='Proxy Mesh', icon_value=0)
+            row_33E8E = box_18E8E.row(heading='', align=True)
+            row_33E8E.alert = False
+            row_33E8E.enabled = True
+            row_33E8E.active = True
+            row_33E8E.use_property_split = False
+            row_33E8E.use_property_decorate = False
+            row_33E8E.scale_x = 1.0
+            row_33E8E.scale_y = 1.0
+            row_33E8E.alignment = 'Expand'.upper()
+            row_33E8E.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+            row_33E8E.prop(bpy.context.view_layer.objects.active.sna_dgs_object_properties, 'rig_proxy_mesh', text='', icon_value=0, emboss=True)
+            if (bpy.context.view_layer.objects.active.sna_dgs_object_properties.rig_proxy_mesh == None):
+                pass
+            else:
+                row_BD7EE = row_33E8E.row(heading='', align=True)
+                row_BD7EE.alert = False
+                row_BD7EE.enabled = True
+                row_BD7EE.active = True
+                row_BD7EE.use_property_split = False
+                row_BD7EE.use_property_decorate = False
+                row_BD7EE.scale_x = 1.0
+                row_BD7EE.scale_y = 1.0
+                row_BD7EE.alignment = 'Expand'.upper()
+                row_BD7EE.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                op = row_BD7EE.operator('sna.dgs_render_select_object_b1f49', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'mouse-pointer.svg')), emboss=True, depress=False)
+                op.sna_object_name = bpy.context.view_layer.objects.active.sna_dgs_object_properties.rig_proxy_mesh.name
+                row_BD7EE.prop(bpy.context.view_layer.objects.active.sna_dgs_object_properties.rig_proxy_mesh, 'hide_viewport', text='', icon_value=0, emboss=True)
+                row_BD7EE.prop(bpy.context.view_layer.objects.active.sna_dgs_object_properties.rig_proxy_mesh, 'hide_render', text='', icon_value=0, emboss=True)
+            if (bpy.context.view_layer.objects.active.sna_dgs_object_properties.rig_proxy_mesh == None):
+                pass
+            else:
+                col_9A00F.separator(factor=3.0)
+                col_DA035 = col_9A00F.column(heading='', align=False)
+                col_DA035.alert = False
+                col_DA035.enabled = True
+                col_DA035.active = True
+                col_DA035.use_property_split = False
+                col_DA035.use_property_decorate = False
+                col_DA035.scale_x = 1.0
+                col_DA035.scale_y = 1.0
+                col_DA035.alignment = 'Expand'.upper()
+                col_DA035.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                row_18A3E = col_DA035.row(heading='', align=False)
+                row_18A3E.alert = False
+                row_18A3E.enabled = True
+                row_18A3E.active = True
+                row_18A3E.use_property_split = False
+                row_18A3E.use_property_decorate = False
+                row_18A3E.scale_x = 1.0
+                row_18A3E.scale_y = 2.0
+                row_18A3E.alignment = 'Expand'.upper()
+                row_18A3E.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                row_18A3E.prop(bpy.context.scene.sna_dgs_scene_properties, 'light_bake_active_menu', text=bpy.context.scene.sna_dgs_scene_properties.light_bake_active_menu, icon_value=0, emboss=True, expand=True)
+                if bpy.context.scene.sna_dgs_scene_properties.light_bake_active_menu == "1. Store Light":
+                    col_56E5A = col_DA035.column(heading='', align=False)
+                    col_56E5A.alert = True
+                    col_56E5A.enabled = True
+                    col_56E5A.active = True
+                    col_56E5A.use_property_split = False
+                    col_56E5A.use_property_decorate = False
+                    col_56E5A.scale_x = 1.0
+                    col_56E5A.scale_y = 1.0
+                    col_56E5A.alignment = 'Expand'.upper()
+                    col_56E5A.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                    if 'proxy_deferred_relight_stage_saved' in bpy.context.view_layer.objects.active:
+                        if bpy.context.view_layer.objects.active['proxy_deferred_relight_stage_saved']:
+                            box_D56BA = col_56E5A.box()
+                            box_D56BA.alert = False
+                            box_D56BA.enabled = True
+                            box_D56BA.active = True
+                            box_D56BA.use_property_split = False
+                            box_D56BA.use_property_decorate = False
+                            box_D56BA.alignment = 'Expand'.upper()
+                            box_D56BA.scale_x = 1.0
+                            box_D56BA.scale_y = 1.0
+                            if not True: box_D56BA.operator_context = "EXEC_DEFAULT"
+                            box_D56BA.label(text='Light data has previously been saved', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+                    col_305D8 = col_56E5A.column(heading='', align=False)
+                    col_305D8.alert = False
+                    col_305D8.enabled = True
+                    col_305D8.active = True
+                    col_305D8.use_property_split = False
+                    col_305D8.use_property_decorate = False
+                    col_305D8.scale_x = 1.0
+                    col_305D8.scale_y = 2.0
+                    col_305D8.alignment = 'Expand'.upper()
+                    col_305D8.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                    op = col_305D8.operator('sna.dgs_render_store_original_lighting_99939', text='Store Original Lighting', icon_value=0, emboss=True, depress=False)
+                elif bpy.context.scene.sna_dgs_scene_properties.light_bake_active_menu == "2. Bake Light":
+                    layout_function = col_DA035
+                    sna_light_bake_build_8B9DD(layout_function, )
+                elif bpy.context.scene.sna_dgs_scene_properties.light_bake_active_menu == "3. Apply Light":
+                    layout_function = col_DA035
+                    sna_light_bake_apply_A5653(layout_function, )
+                else:
+                    pass
+                box_82787 = col_DA035.box()
+                box_82787.alert = False
+                box_82787.enabled = True
+                box_82787.active = True
+                box_82787.use_property_split = False
+                box_82787.use_property_decorate = False
+                box_82787.alignment = 'Expand'.upper()
+                box_82787.scale_x = 1.0
+                box_82787.scale_y = 1.0
+                if not True: box_82787.operator_context = "EXEC_DEFAULT"
+                col_9B44F = box_82787.column(heading='', align=False)
+                col_9B44F.alert = True
+                col_9B44F.enabled = True
+                col_9B44F.active = True
+                col_9B44F.use_property_split = False
+                col_9B44F.use_property_decorate = False
+                col_9B44F.scale_x = 1.0
+                col_9B44F.scale_y = 1.0
+                col_9B44F.alignment = 'Expand'.upper()
+                col_9B44F.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                op = col_9B44F.operator('sna.dgs_render_restore_original_light_9a7fe', text='Restore Lighting', icon_value=0, emboss=True, depress=False)
+        else:
+            box_B787A = col_3F618.box()
+            box_B787A.alert = False
+            box_B787A.enabled = True
+            box_B787A.active = True
+            box_B787A.use_property_split = False
+            box_B787A.use_property_decorate = False
+            box_B787A.alignment = 'Expand'.upper()
+            box_B787A.scale_x = 1.0
+            box_B787A.scale_y = 2.0
+            if not True: box_B787A.operator_context = "EXEC_DEFAULT"
+            box_B787A.label(text='The Active Object is not a 3DGS Mesh', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+
+
+def sna_dgs_mods_uv_edit_7D8A8(layout_function, ):
+    if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Render_UV_Edit_GN' in bpy.context.view_layer.objects.active.modifiers):
+        box_9FF77 = layout_function.box()
+        box_9FF77.alert = False
+        box_9FF77.enabled = True
+        box_9FF77.active = True
+        box_9FF77.use_property_split = False
+        box_9FF77.use_property_decorate = False
+        box_9FF77.alignment = 'Expand'.upper()
+        box_9FF77.scale_x = 1.0
+        box_9FF77.scale_y = 1.0
+        if not True: box_9FF77.operator_context = "EXEC_DEFAULT"
+        split_CE162 = box_9FF77.split(factor=0.5, align=False)
+        split_CE162.alert = False
+        split_CE162.enabled = True
+        split_CE162.active = True
+        split_CE162.use_property_split = False
+        split_CE162.use_property_decorate = False
+        split_CE162.scale_x = 1.0
+        split_CE162.scale_y = 1.0
+        split_CE162.alignment = 'Expand'.upper()
+        if not True: split_CE162.operator_context = "EXEC_DEFAULT"
+        split_CE162.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN'], 'show_viewport', text='UV Edit', icon_value=0, emboss=True, toggle=True)
+        row_DE4FE = split_CE162.row(heading='', align=True)
+        row_DE4FE.alert = False
+        row_DE4FE.enabled = True
+        row_DE4FE.active = True
+        row_DE4FE.use_property_split = False
+        row_DE4FE.use_property_decorate = False
+        row_DE4FE.scale_x = 1.0
+        row_DE4FE.scale_y = 1.0
+        row_DE4FE.alignment = 'Right'.upper()
+        row_DE4FE.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+        row_DE4FE.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN'], 'show_render', text='', icon_value=0, emboss=True, toggle=True)
+        op = row_DE4FE.operator('sna.dgs_render_apply_modifier_0f5f2', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'check.svg')), emboss=True, depress=False)
+        op.sna_target_object = bpy.context.view_layer.objects.active.name
+        op.sna_target_modifier = 'KIRI_3DGS_Render_UV_Edit_GN'
+        op = row_DE4FE.operator('sna.dgs_render_remove_modifier_9cf0d', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'trash.svg')), emboss=True, depress=False)
+        op.sna_target_object = bpy.context.view_layer.objects.active.name
+        op.sna_target_modifier = 'KIRI_3DGS_Render_UV_Edit_GN'
+        box_E2654 = box_9FF77.box()
+        box_E2654.alert = False
+        box_E2654.enabled = True
+        box_E2654.active = True
+        box_E2654.use_property_split = False
+        box_E2654.use_property_decorate = False
+        box_E2654.alignment = 'Expand'.upper()
+        box_E2654.scale_x = 1.0
+        box_E2654.scale_y = 1.0
+        if not True: box_E2654.operator_context = "EXEC_DEFAULT"
+        attr_B95E2 = '["' + str('Socket_101' + '"]') 
+        box_E2654.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN'], attr_B95E2, text='UV Name', icon_value=0, emboss=True, toggle=True)
+        attr_5057A = '["' + str('Socket_81' + '"]') 
+        box_E2654.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN'], attr_5057A, text='', icon_value=0, emboss=True, toggle=True)
+        if (bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN']['Socket_81'] == 1):
+            col_B844C = box_E2654.column(heading='', align=True)
+            col_B844C.alert = False
+            col_B844C.enabled = True
+            col_B844C.active = True
+            col_B844C.use_property_split = False
+            col_B844C.use_property_decorate = False
+            col_B844C.scale_x = 1.0
+            col_B844C.scale_y = 1.0
+            col_B844C.alignment = 'Expand'.upper()
+            col_B844C.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+            attr_09238 = '["' + str('Socket_79' + '"]') 
+            col_B844C.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN'], attr_09238, text='', icon_value=0, emboss=True, toggle=True)
+            if (bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN']['Socket_79'] == 1):
+                attr_67DDE = '["' + str('Socket_80' + '"]') 
+                col_B844C.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN'], attr_67DDE, text='', icon_value=0, emboss=True, toggle=True)
+            attr_BB6E4 = '["' + str('Socket_105' + '"]') 
+            col_B844C.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN'], attr_BB6E4, text='', icon_value=0, emboss=True, toggle=True)
+        box_06FCC = box_9FF77.box()
+        box_06FCC.alert = False
+        box_06FCC.enabled = True
+        box_06FCC.active = True
+        box_06FCC.use_property_split = False
+        box_06FCC.use_property_decorate = False
+        box_06FCC.alignment = 'Expand'.upper()
+        box_06FCC.scale_x = 1.0
+        box_06FCC.scale_y = 1.0
+        if not True: box_06FCC.operator_context = "EXEC_DEFAULT"
+        attr_86FBB = '["' + str('Socket_83' + '"]') 
+        box_06FCC.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN'], attr_86FBB, text='Align to direction', icon_value=0, emboss=True)
+        if bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN']['Socket_83']:
+            col_9BFFE = box_06FCC.column(heading='', align=True)
+            col_9BFFE.alert = False
+            col_9BFFE.enabled = True
+            col_9BFFE.active = True
+            col_9BFFE.use_property_split = False
+            col_9BFFE.use_property_decorate = False
+            col_9BFFE.scale_x = 1.0
+            col_9BFFE.scale_y = 1.0
+            col_9BFFE.alignment = 'Expand'.upper()
+            col_9BFFE.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+            col_9BFFE.label(text='Axis', icon_value=0)
+            row_A1034 = col_9BFFE.row(heading='', align=False)
+            row_A1034.alert = False
+            row_A1034.enabled = True
+            row_A1034.active = True
+            row_A1034.use_property_split = False
+            row_A1034.use_property_decorate = False
+            row_A1034.scale_x = 1.0
+            row_A1034.scale_y = 1.0
+            row_A1034.alignment = 'Expand'.upper()
+            row_A1034.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+            attr_9CCDE = '["' + str('Socket_85' + '"]') 
+            row_A1034.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN'], attr_9CCDE, text='.', icon_value=0, emboss=True, expand=True)
+            attr_1E2BC = '["' + str('Socket_84' + '"]') 
+            col_9BFFE.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN'], attr_1E2BC, text='Direction', icon_value=0, emboss=True)
+            attr_81350 = '["' + str('Socket_86' + '"]') 
+            col_9BFFE.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN'], attr_81350, text='Rotation', icon_value=0, emboss=True, toggle=True)
+        box_3BC41 = box_9FF77.box()
+        box_3BC41.alert = False
+        box_3BC41.enabled = True
+        box_3BC41.active = True
+        box_3BC41.use_property_split = False
+        box_3BC41.use_property_decorate = False
+        box_3BC41.alignment = 'Expand'.upper()
+        box_3BC41.scale_x = 1.0
+        box_3BC41.scale_y = 1.0
+        if not True: box_3BC41.operator_context = "EXEC_DEFAULT"
+        attr_6A5D2 = '["' + str('Socket_106' + '"]') 
+        box_3BC41.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN'], attr_6A5D2, text='Transform', icon_value=0, emboss=True)
+        if bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN']['Socket_106']:
+            col_A8AB9 = box_3BC41.column(heading='', align=False)
+            col_A8AB9.alert = False
+            col_A8AB9.enabled = True
+            col_A8AB9.active = True
+            col_A8AB9.use_property_split = False
+            col_A8AB9.use_property_decorate = False
+            col_A8AB9.scale_x = 1.0
+            col_A8AB9.scale_y = 1.0
+            col_A8AB9.alignment = 'Expand'.upper()
+            col_A8AB9.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+            attr_082AE = '["' + str('Socket_87' + '"]') 
+            col_A8AB9.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN'], attr_082AE, text='Translation', icon_value=0, emboss=True, expand=True)
+            attr_1AE94 = '["' + str('Socket_88' + '"]') 
+            col_A8AB9.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN'], attr_1AE94, text='Rotation', icon_value=0, emboss=True)
+            attr_0F93F = '["' + str('Socket_89' + '"]') 
+            col_A8AB9.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN'], attr_0F93F, text='Scale', icon_value=0, emboss=True, toggle=True)
+            row_77081 = col_A8AB9.row(heading='', align=False)
+            row_77081.alert = False
+            row_77081.enabled = True
+            row_77081.active = True
+            row_77081.use_property_split = False
+            row_77081.use_property_decorate = False
+            row_77081.scale_x = 1.0
+            row_77081.scale_y = 1.0
+            row_77081.alignment = 'Expand'.upper()
+            row_77081.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+            attr_20D92 = '["' + str('Socket_91' + '"]') 
+            row_77081.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN'], attr_20D92, text='Flip U', icon_value=0, emboss=True, toggle=True)
+            attr_55098 = '["' + str('Socket_92' + '"]') 
+            row_77081.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN'], attr_55098, text='Flip V', icon_value=0, emboss=True, toggle=True)
+            attr_65309 = '["' + str('Socket_95' + '"]') 
+            col_A8AB9.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN'], attr_65309, text='Randomize', icon_value=0, emboss=True, toggle=False)
+            if bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN']['Socket_95']:
+                col_06A74 = col_A8AB9.column(heading='', align=False)
+                col_06A74.alert = False
+                col_06A74.enabled = True
+                col_06A74.active = True
+                col_06A74.use_property_split = False
+                col_06A74.use_property_decorate = False
+                col_06A74.scale_x = 1.0
+                col_06A74.scale_y = 1.0
+                col_06A74.alignment = 'Expand'.upper()
+                col_06A74.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                attr_38294 = '["' + str('Socket_96' + '"]') 
+                col_06A74.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN'], attr_38294, text='Offset', icon_value=0, emboss=True, toggle=True)
+                attr_850DC = '["' + str('Socket_97' + '"]') 
+                col_06A74.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN'], attr_850DC, text='Rotation', icon_value=0, emboss=True, toggle=True)
+                attr_CF180 = '["' + str('Socket_98' + '"]') 
+                col_06A74.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_UV_Edit_GN'], attr_CF180, text='Seed', icon_value=0, emboss=True, toggle=True)
+    else:
+        box_01F2C = layout_function.box()
+        box_01F2C.alert = False
+        box_01F2C.enabled = 'OBJECT'==bpy.context.mode
+        box_01F2C.active = True
+        box_01F2C.use_property_split = False
+        box_01F2C.use_property_decorate = False
+        box_01F2C.alignment = 'Expand'.upper()
+        box_01F2C.scale_x = 1.0
+        box_01F2C.scale_y = 1.0
+        if not True: box_01F2C.operator_context = "EXEC_DEFAULT"
+        row_34CC5 = box_01F2C.row(heading='', align=False)
+        row_34CC5.alert = False
+        row_34CC5.enabled = True
+        row_34CC5.active = True
+        row_34CC5.use_property_split = False
+        row_34CC5.use_property_decorate = False
+        row_34CC5.scale_x = 1.0
+        row_34CC5.scale_y = 1.0
+        row_34CC5.alignment = 'Expand'.upper()
+        row_34CC5.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+        row_34CC5.label(text='UV Edit', icon_value=0)
+        op = row_34CC5.operator('sna.dgs_render_add_uv_edit_modifier_e8ae6', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'plus-circle.svg')), emboss=True, depress=False)
+
+
+class SNA_OT_Dgs_Render_Add_Uv_Edit_Modifier_E8Ae6(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_add_uv_edit_modifier_e8ae6"
+    bl_label = "3DGS Render: Add UV Edit Modifier"
+    bl_description = "Adds a UV Edit modifier to the active object."
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        if (bpy.context.view_layer.objects.active.type == 'MESH' or bpy.context.view_layer.objects.active.type == 'CURVE'):
+            created_modifier_0_06d8b = sna_append_and_add_geo_nodes_function_execute_6BCD7('KIRI_3DGS_Render_UV_Edit_GN', 'KIRI_3DGS_Render_UV_Edit_GN', bpy.context.view_layer.objects.active)
+            sna_move_modifier_index_23126(bpy.context.view_layer.objects.active, 'KIRI_3DGS_Render_UV_Edit_GN', int(len(bpy.context.view_layer.objects.active.modifiers) - 1.0))
+        else:
+            self.report({'INFO'}, message='The Active Object is not a mesh or curve object.')
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+@persistent
+def render_pre_handler_77179(dummy):
+    for i_55361 in range(len(bpy.context.scene.objects)):
+        if (property_exists("bpy.context.scene.objects[i_55361].modifiers", globals(), locals()) and 'KIRI_3DGS_Render_GN' in bpy.context.scene.objects[i_55361].modifiers):
+            bpy.context.scene.objects[i_55361].modifiers['KIRI_3DGS_Render_GN']['Socket_34'] = bpy.context.scene.render.resolution_x
+            bpy.context.scene.objects[i_55361].modifiers['KIRI_3DGS_Render_GN']['Socket_35'] = bpy.context.scene.render.resolution_y
+            bpy.context.scene.objects[i_55361].update_tag(refresh={'OBJECT'}, )
+    if bpy.context and bpy.context.screen:
+        for a in bpy.context.screen.areas:
+            a.tag_redraw()
+
+
+class SNA_OT_Dgs_Render_Bind_To_Proxy_Mesh_6C58F(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_bind_to_proxy_mesh_6c58f"
+    bl_label = "3DGS Render: Bind to Proxy Mesh"
+    bl_description = "Binds the Active Object to the assigned Proxy Mesh."
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        if bpy.context.view_layer.objects.active.sna_dgs_object_properties.rig_proxy_mesh.type == 'MESH':
+            if (bpy.context.view_layer.objects.active.sna_dgs_object_properties.rig_proxy_mesh == bpy.context.view_layer.objects.active):
+                self.report({'ERROR'}, message='The assigned Proxy Mesh and the Active Object are the same')
+            else:
+                bpy.context.view_layer.objects.active.lock_location = (True, True, True)
+                bpy.context.view_layer.objects.active.lock_rotation = (True, True, True)
+                bpy.context.view_layer.objects.active.lock_scale = (True, True, True)
+                CHILD_NAME = bpy.context.view_layer.objects.active.name
+                PARENT_NAME = bpy.context.view_layer.objects.active.sna_dgs_object_properties.rig_proxy_mesh.name
+                # ==========================================
+                # VARIABLES (Set these for your Serprens node)
+                # ==========================================
+                #CHILD_NAME = "Cube"      # Replace with the name of the object to be parented
+                #PARENT_NAME = "Sphere"   # Replace with the name of the target parent object
+                # ==========================================
+                # SCRIPT LOGIC
+                # ==========================================
+
+                def parent_keep_transform(child_name, parent_name):
+                    # 1. Fetch the objects securely from the Data API
+                    child = bpy.data.objects.get(child_name)
+                    parent = bpy.data.objects.get(parent_name)
+                    # 2. Safety check: Ensure both objects actually exist in the file
+                    if not child:
+                        print(f"Error: Could not find child object '{child_name}'")
+                        return
+                    if not parent:
+                        print(f"Error: Could not find parent object '{parent_name}'")
+                        return
+                    # 3. Safety check: Prevent an object from parenting to itself
+                    if child == parent:
+                        print("Error: Object cannot be a parent of itself.")
+                        return
+                    # 4. Perform the hierarchy change
+                    child.parent = parent
+                    # 5. Apply the inverse matrix math to freeze the visual transform
+                    child.matrix_parent_inverse = parent.matrix_world.inverted()
+                    # Optional: Force a scene update so the viewport refreshes instantly
+                    bpy.context.view_layer.update()
+                    print(f"Success: '{child_name}' parented to '{parent_name}' with transforms kept.")
+                # Execute the function using the variables at the top
+                parent_keep_transform(CHILD_NAME, PARENT_NAME)
+                bpy.context.view_layer.objects.active['rig_baked_render_enabled'] = True
+                proxy_mesh_object = bpy.context.view_layer.objects.active.sna_dgs_object_properties.rig_proxy_mesh
+                proxy_binding_cache_root = bpy.context.preferences.addons[__package__].preferences.sna_cache_file_directory
+                binding_method = bpy.context.scene.sna_dgs_scene_properties.rig_bind_method
+                hybrid_surface_distance_factor = bpy.context.scene.sna_dgs_scene_properties.rig_surface_dist_factor
+                proxy_neighbor_count = bpy.context.scene.sna_dgs_scene_properties.rig_bind_samples
+                proxy_binding_utils_path = os.path.join(os.path.dirname(__file__), 'assets', 'proxy_binding_utils.py')
+                import inspect
+                import sys
+                #proxy_binding_utils_path = "D:/GithubRepos/3DGS Render_Render Updates/rigging/proxy_binding_utils.py"  # Input: full path to proxy_binding_utils.py, e.g. D:/GithubRepos/3DGS Render_Render Updates/rigging/proxy_binding_utils.py
+                #proxy_binding_cache_root = "D:/GithubRepos/3DGS Render_Render Updates/rigging"  # Input: optional folder for binding cache packages; blank = blend folder if saved, otherwise system temp
+                target_mode = "Active"  # Input: Active or Input Object
+                target_obj = None  # Input: mesh 3DGS object pointer or object name when target_mode is Input Object
+                #proxy_mesh_object = None  # Input: proxy mesh object pointer or object name; if empty, fallback uses the selected proxy mesh
+                #binding_method = "Volumetric"  # Input: Volumetric, Surface, or Hybrid
+                #proxy_neighbor_count = 32  # Input: nearest proxy vertices per splat; higher counts are more stable for volumetric splats
+                #hybrid_surface_distance_factor = 1.5  # Input: Hybrid only; lower = more volumetric, higher = more surface-following
+                success = False
+                status_message = ""
+                binding_package_path = ""
+                binding_root_path = ""
+                binding_method_used = ""
+
+                def load_proxy_binding_utils():
+                    import bpy
+                    module_name = "proxy_binding_utils"
+                    candidate_paths = []
+                    override_path = str(proxy_binding_utils_path).strip()
+                    if override_path:
+                        candidate_paths.append(os.path.abspath(bpy.path.abspath(override_path)))
+                    file_hint = globals().get("__file__") or inspect.getsourcefile(lambda: 0)
+                    if file_hint and os.path.exists(file_hint):
+                        script_dir = os.path.dirname(os.path.abspath(file_hint))
+                        candidate_paths.append(os.path.join(script_dir, "proxy_binding_utils.py"))
+                        candidate_paths.append(os.path.join(script_dir, "rigging", "proxy_binding_utils.py"))
+                    cwd = os.getcwd()
+                    candidate_paths.append(os.path.join(cwd, "proxy_binding_utils.py"))
+                    candidate_paths.append(os.path.join(cwd, "rigging", "proxy_binding_utils.py"))
+                    blend_dir = bpy.path.abspath("//")
+                    if blend_dir:
+                        candidate_paths.append(os.path.join(blend_dir, "proxy_binding_utils.py"))
+                        candidate_paths.append(os.path.join(blend_dir, "rigging", "proxy_binding_utils.py"))
+                    checked_paths = set()
+                    for module_path in candidate_paths:
+                        normalized = os.path.normpath(module_path)
+                        if normalized in checked_paths:
+                            continue
+                        checked_paths.add(normalized)
+                        if os.path.exists(normalized):
+                            spec = importlib.util.spec_from_file_location(module_name, normalized)
+                            module = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(module)
+                            sys.modules[module_name] = module
+                            return module
+                    text_name_candidates = (
+                        "proxy_binding_utils.py",
+                        "Rigging - proxy_binding_utils.py",
+                        "proxy_binding_utils",
+                        "Rigging - proxy_binding_utils",
+                    )
+                    for text_name in text_name_candidates:
+                        text_block = bpy.data.texts.get(text_name)
+                        if text_block:
+                            module = types.ModuleType(module_name)
+                            module.__file__ = text_name
+                            exec(compile(text_block.as_string(), text_name, "exec"), module.__dict__)
+                            sys.modules[module_name] = module
+                            return module
+                    for text_block in bpy.data.texts:
+                        if "proxy_binding_utils" in text_block.name.lower():
+                            module = types.ModuleType(module_name)
+                            module.__file__ = text_block.name
+                            exec(compile(text_block.as_string(), text_block.name, "exec"), module.__dict__)
+                            sys.modules[module_name] = module
+                            return module
+                    raise RuntimeError(
+                        "Could not find proxy_binding_utils.py. Set the top input variable "
+                        "'proxy_binding_utils_path' to the helper file on disk, or load "
+                        "proxy_binding_utils.py as a Blender text block too."
+                    )
+                proxy_utils = load_proxy_binding_utils()
+                proxy_utils.PROXY_BINDING_ROOT_OVERRIDE = str(proxy_binding_cache_root).strip()
+                print("Binding active mesh 3DGS object to proxy mesh...")
+                try:
+                    mesh_obj = proxy_utils.resolve_target_mesh_object(
+                        target_mode=target_mode,
+                        target_obj=target_obj,
+                        require_bound=False,
+                        allow_all=False,
+                    )
+                    mesh_obj, proxy_obj, metadata = proxy_utils.bind_3dgs_object_to_proxy(
+                        mesh_obj,
+                        proxy_input=proxy_mesh_object,
+                        neighbor_count=proxy_neighbor_count,
+                        binding_method=binding_method,
+                        hybrid_surface_distance_factor=hybrid_surface_distance_factor,
+                    )
+                    success = True
+                    binding_package_path = mesh_obj[proxy_utils.PROXY_BINDING_PATH_PROP]
+                    binding_root_path = proxy_utils.get_binding_root_dir()
+                    binding_method_used = metadata.get("binding_method", binding_method)
+                    status_message = f"Bound '{mesh_obj.name}' to proxy '{proxy_obj.name}'."
+                    print(
+                        f"Bound '{mesh_obj.name}' to proxy '{proxy_obj.name}' using "
+                        f"binding method '{binding_method_used}'."
+                    )
+                    if metadata["binding_method"] == "Volumetric":
+                        print(f"Nearest proxy vertices per splat: {metadata['neighbors_per_splat']}")
+                    elif metadata["binding_method"] == "Hybrid":
+                        print(f"Nearest proxy vertices per splat: {metadata['neighbors_per_splat']}")
+                        print(
+                            f"Hybrid classification: surface={metadata.get('hybrid_surface_count', 0):,}, "
+                            f"volumetric={metadata.get('hybrid_volumetric_count', 0):,}, "
+                            f"surface distance factor={metadata.get('hybrid_surface_distance_factor', hybrid_surface_distance_factor)}"
+                        )
+                    print(f"Splats bound: {metadata['splat_count']:,}")
+                    print(f"Binding package: {binding_package_path}")
+                    print(f"Binding root: {binding_root_path}")
+                    print("The 3DGS object now has a rest cache and can be updated, baked, or restored later.")
+                except Exception as exc:
+                    status_message = f"Proxy bind failed: {exc}"
+                    print(status_message)
+                    raise
+        else:
+            self.report({'ERROR'}, message='The assigned Proxy Mesh is not a Mesh type object.')
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+class SNA_OT_Dgs_Render_Select_Proxy_Mesh_E76B7(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_select_proxy_mesh_e76b7"
+    bl_label = "3DGS Render: Select Proxy Mesh"
+    bl_description = ""
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        input_object = bpy.context.view_layer.objects.active.sna_dgs_object_properties.rig_proxy_mesh
+        # --- Input Variables (For testing or Serpens integration) ---
+        #input_object = bpy.context.object  # The target object
+        deselect_all_first = True          # Clear selection before starting?
+        make_active = True                 # NEW: Toggle between just selecting or selecting + activating
+        # --- Output Variables ---
+        success = False
+        error_message = ""
+
+        def safe_deselect_all():
+            try:
+                view_layer = bpy.context.view_layer
+                for obj in bpy.context.selected_objects[:]:
+                    if obj.name in view_layer.objects:
+                        obj.select_set(False)
+                # Only clear active if we actually want to reset everything
+                if view_layer.objects.active:
+                    view_layer.objects.active = None
+                return True, ""
+            except Exception as e:
+                return False, f"Deselect error: {str(e)}"
+
+        def select_object_logic(obj, should_activate):
+            if not obj:
+                return False, "No object provided"
+            try:
+                view_layer = bpy.context.view_layer
+                if obj.name not in view_layer.objects:
+                    return False, f"Object '{obj.name}' not in current view layer"
+                # 1. Unhide Object
+                if obj.hide_viewport:
+                    obj.hide_viewport = False
+                view_layer_obj = view_layer.objects[obj.name]
+                if view_layer_obj.hide_get():
+                    view_layer_obj.hide_set(False)
+                # 2. Unhide Direct Parent Collections
+                for col in obj.users_collection:
+                    if col.hide_viewport:
+                        col.hide_viewport = False
+                # 3. Select 
+                view_layer_obj.select_set(True)
+                # 4. Conditionally Activate
+                if should_activate:
+                    view_layer.objects.active = view_layer_obj
+                    msg = f"Selected and activated {obj.name}"
+                else:
+                    msg = f"Selected {obj.name} (Active object remains {view_layer.objects.active})"
+                return True, msg
+            except Exception as e:
+                return False, f"Selection error: {str(e)}"
+        # --- Execution Logic ---
+        # 1. Handle Deselection
+        if deselect_all_first:
+            success, error_message = safe_deselect_all()
+        else:
+            success = True # Skip deselect, proceed to selection
+        # 2. Handle Selection
+        if success:
+            if input_object:
+                success, error_message = select_object_logic(input_object, make_active)
+            else:
+                success = False
+                error_message = "No input object provided"
+        print(f"Result -> Success: {success}, Message: {error_message}")
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+class SNA_OT_Dgs_Render_Update_Bound_3Dgs_From_Proxy_Mesh_951A0(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_update_bound_3dgs_from_proxy_mesh_951a0"
+    bl_label = "3DGS Render: Update Bound 3DGS from Proxy Mesh"
+    bl_description = ""
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        if 'proxy_sequence_binding' in bpy.context.view_layer.objects.active:
+            if bpy.context.view_layer.objects.active['proxy_sequence_binding']:
+                success_0_47472 = sna_rig_5_apply_baked_cache_5656F('Active', None)
+                if success_0_47472:
+                    pass
+                else:
+                    sna_rig2_update_single_DC225()
+            else:
+                sna_rig2_update_single_DC225()
+        else:
+            sna_rig2_update_single_DC225()
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+class SNA_OT_Dgs_Render_Bake_Frames_To_Cache_90885(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_bake_frames_to_cache_90885"
+    bl_label = "3DGS Render: Bake Frames to Cache"
+    bl_description = ""
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        proxy_binding_cache_root = bpy.context.preferences.addons[__package__].preferences.sna_cache_file_directory
+
+        deform_mode = bpy.context.scene.sna_dgs_scene_properties.rig_deform_mode
+        scale_safety_mode = bpy.context.scene.sna_dgs_scene_properties.rig_scale_safety_mode
+        bake_frame_step = bpy.context.scene.sna_dgs_scene_properties.rig_bake_frame_step
+        bake_frame_start = bpy.context.scene.sna_dgs_scene_properties.rig_bake_start_frame
+        bake_frame_end = bpy.context.scene.sna_dgs_scene_properties.rig_bake_end_frame
+        update_sh_attributes = bpy.context.scene.sna_dgs_scene_properties.rig_update_sh_attributes
+        sh_quality_mode = bpy.context.scene.sna_dgs_scene_properties.rig_sh_quality_mode
+        proxy_binding_utils_path = os.path.join(os.path.dirname(__file__), 'assets', 'proxy_binding_utils.py')
+        import inspect
+        import sys
+        #proxy_binding_utils_path = "D:/GithubRepos/3DGS Render_Render Updates/rigging/proxy_binding_utils.py"  # Input: full path to proxy_binding_utils.py, e.g. D:/GithubRepos/3DGS Render_Render Updates/rigging/proxy_binding_utils.py
+        #proxy_binding_cache_root = "D:/GithubRepos/3DGS Render_Render Updates/rigging"  # Input: optional folder for binding cache packages; blank = blend folder if saved, otherwise system temp
+        target_mode = "Active"  # Input: Active, Input Object, or All Bound
+        target_obj = None  # Input: mesh 3DGS object pointer or object name when target_mode is Input Object
+        #deform_mode = "Elastic"  # Input: Stable, Adaptive, or Elastic
+        #scale_safety_mode = "Local Clamp"  # Input: Off, Global Clamp, or Local Clamp
+        #sh_quality_mode = "Final"  # Input: Fast (24 samples), Balanced (32 samples), or Final (48 samples)
+        #update_sh_attributes = True  # Input: True = rotate/update SH during bake; False = keep rest SH for faster preview-style bakes
+        #bake_frame_start = None  # Input: first frame to bake; None = use scene.frame_start
+        #bake_frame_end = None  # Input: last frame to bake; None = use scene.frame_end
+        #bake_frame_step = 1  # Input: bake every Nth frame; 1 = every frame
+        success = False
+        status_message = ""
+        baked_frame_count = 0
+        bake_output_dir = ""
+        sequence_available = False
+        resolved_frame_start = None
+        resolved_frame_end = None
+        resolved_frame_step = None
+        processed_count = 0
+        failed_count = 0
+        processed_names = []
+        failed_names = []
+
+        def load_proxy_binding_utils():
+            module_name = "proxy_binding_utils"
+            candidate_paths = []
+            override_path = str(proxy_binding_utils_path).strip()
+            if override_path:
+                candidate_paths.append(os.path.abspath(bpy.path.abspath(override_path)))
+            file_hint = globals().get("__file__") or inspect.getsourcefile(lambda: 0)
+            if file_hint and os.path.exists(file_hint):
+                script_dir = os.path.dirname(os.path.abspath(file_hint))
+                candidate_paths.append(os.path.join(script_dir, "proxy_binding_utils.py"))
+                candidate_paths.append(os.path.join(script_dir, "rigging", "proxy_binding_utils.py"))
+            cwd = os.getcwd()
+            candidate_paths.append(os.path.join(cwd, "proxy_binding_utils.py"))
+            candidate_paths.append(os.path.join(cwd, "rigging", "proxy_binding_utils.py"))
+            blend_dir = bpy.path.abspath("//")
+            if blend_dir:
+                candidate_paths.append(os.path.join(blend_dir, "proxy_binding_utils.py"))
+                candidate_paths.append(os.path.join(blend_dir, "rigging", "proxy_binding_utils.py"))
+            checked_paths = set()
+            for module_path in candidate_paths:
+                normalized = os.path.normpath(module_path)
+                if normalized in checked_paths:
+                    continue
+                checked_paths.add(normalized)
+                if os.path.exists(normalized):
+                    spec = importlib.util.spec_from_file_location(module_name, normalized)
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    sys.modules[module_name] = module
+                    return module
+            text_name_candidates = (
+                "proxy_binding_utils.py",
+                "Rigging - proxy_binding_utils.py",
+                "proxy_binding_utils",
+                "Rigging - proxy_binding_utils",
+            )
+            for text_name in text_name_candidates:
+                text_block = bpy.data.texts.get(text_name)
+                if text_block:
+                    module = types.ModuleType(module_name)
+                    module.__file__ = text_name
+                    exec(compile(text_block.as_string(), text_name, "exec"), module.__dict__)
+                    sys.modules[module_name] = module
+                    return module
+            for text_block in bpy.data.texts:
+                if "proxy_binding_utils" in text_block.name.lower():
+                    module = types.ModuleType(module_name)
+                    module.__file__ = text_block.name
+                    exec(compile(text_block.as_string(), text_block.name, "exec"), module.__dict__)
+                    sys.modules[module_name] = module
+                    return module
+            raise RuntimeError(
+                "Could not find proxy_binding_utils.py. Set the top input variable "
+                "'proxy_binding_utils_path' to the helper file on disk, or load "
+                "proxy_binding_utils.py as a Blender text block too."
+            )
+        proxy_utils = load_proxy_binding_utils()
+        proxy_utils.PROXY_BINDING_ROOT_OVERRIDE = str(proxy_binding_cache_root).strip()
+        scene = bpy.context.scene
+        try:
+            resolved_frame_start, resolved_frame_end, resolved_frame_step = proxy_utils.resolve_bake_frame_range(
+                scene,
+                frame_start=bake_frame_start,
+                frame_end=bake_frame_end,
+                frame_step=bake_frame_step,
+            )
+            print(
+                f"Baking proxy-driven 3DGS deformation for frames "
+                f"{resolved_frame_start} to {resolved_frame_end}"
+                f" (step {resolved_frame_step})..."
+            )
+            mesh_objects = proxy_utils.resolve_target_mesh_objects(
+                target_mode=target_mode,
+                target_obj=target_obj,
+                require_bound=True,
+                allow_all=True,
+                active_only=True,
+            )
+            for mesh_obj in mesh_objects:
+                try:
+                    proxy_obj, baked_frames, removed_files = proxy_utils.bake_bound_animation_with_options(
+                        mesh_obj,
+
+                        deform_mode=deform_mode,
+                        scale_safety_mode=scale_safety_mode,
+                        sh_quality_mode=sh_quality_mode,
+                        update_sh_attributes=update_sh_attributes,
+                        frame_start=resolved_frame_start,
+                        frame_end=resolved_frame_end,
+                        frame_step=resolved_frame_step,
+                    )
+                    processed_count += 1
+                    processed_names.append(mesh_obj.name)
+                    baked_frame_count += len(baked_frames)
+                    sequence_available = sequence_available or bool(mesh_obj.get(proxy_utils.PROXY_SEQUENCE_BINDING_PROP))
+                    if single_target:
+                        bake_output_dir = os.path.join(mesh_obj[proxy_utils.PROXY_BINDING_PATH_PROP], "baked_frames")
+                    print(f"Baked '{mesh_obj.name}' from proxy '{proxy_obj.name}'.")
+                    print(f"Frames baked: {len(baked_frames):,}")
+                    print(f"Old baked frames removed first: {removed_files}")
+                    if single_target:
+                        print(f"Bake folder: {bake_output_dir}")
+                    print(f"Binding method: {mesh_obj.get(proxy_utils.PROXY_BINDING_METHOD_PROP, 'Volumetric')}")
+                except Exception as exc:
+                    failed_count += 1
+                    failed_names.append(mesh_obj.name)
+                    print(f"Bake failed for '{mesh_obj.name}': {exc}")
+            success = failed_count == 0 and processed_count > 0
+            status_message = (
+                f"Baked {baked_frame_count:,} frame state(s) across {processed_count} bound 3DGS object(s); "
+                f"failed objects: {failed_count}."
+            )
+            print(status_message)
+            print(f"Binding root: {proxy_utils.get_binding_root_dir()}")
+            print(
+                f"Bake mode: {deform_mode} | Scale safety: {scale_safety_mode} | "
+                f"SH quality: {sh_quality_mode} | Update SH: {bool(proxy_utils.normalize_update_sh_attributes(update_sh_attributes))}"
+            )
+        except Exception as exc:
+            status_message = f"Proxy bake failed: {exc}"
+            print(status_message)
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+class SNA_OT_Dgs_Render_Unbind_From_Proxy_Mesh_7648D(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_unbind_from_proxy_mesh_7648d"
+    bl_label = "3DGS Render: Unbind from Proxy Mesh"
+    bl_description = ""
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        bpy.context.view_layer.objects.active.lock_location = (False, False, False)
+        bpy.context.view_layer.objects.active.lock_rotation = (False, False, False)
+        bpy.context.view_layer.objects.active.lock_scale = (False, False, False)
+        bpy.context.view_layer.objects.active.parent = None
+        object_name = bpy.context.view_layer.objects.active.name
+        property_name = 'proxy_binding_active'
+        # Replace these with your object and property names
+        #object_name = "Cube"
+        #property_name = "my_custom_prop"
+        # Get the object
+        obj = bpy.data.objects.get(object_name)
+        if obj is None:
+            print(f"Error: Object '{object_name}' not found in the scene")
+        else:
+            if property_name in obj:
+                del obj[property_name]
+                print(f"Removed property '{property_name}' from object '{object_name}'")
+            else:
+                print(f"Property '{property_name}' not found on object '{object_name}'")
+        proxy_binding_cache_root = bpy.context.preferences.addons[__package__].preferences.sna_cache_file_directory
+        proxy_binding_utils_path = os.path.join(os.path.dirname(__file__), 'assets', 'proxy_binding_utils.py')
+        import inspect
+        import sys
+        #proxy_binding_utils_path = "D:/GithubRepos/3DGS Render_Render Updates/rigging/proxy_binding_utils.py"  # Input: full path to proxy_binding_utils.py, e.g. D:/GithubRepos/3DGS Render_Render Updates/rigging/proxy_binding_utils.py
+        #proxy_binding_cache_root = "D:/GithubRepos/3DGS Render_Render Updates/rigging"  # Input: optional folder for binding cache packages; blank = blend folder if saved, otherwise system temp
+        target_mode = "Active"  # Input: Active, Input Object, or All Bound
+        target_obj = None  # Input: mesh 3DGS object pointer or object name when target_mode is Input Object
+        success = False
+        status_message = ""
+        processed_count = 0
+        failed_count = 0
+        processed_names = []
+        failed_names = []
+
+        def load_proxy_binding_utils():
+            import bpy
+            module_name = "proxy_binding_utils"
+            candidate_paths = []
+            override_path = str(proxy_binding_utils_path).strip()
+            if override_path:
+                candidate_paths.append(os.path.abspath(bpy.path.abspath(override_path)))
+            file_hint = globals().get("__file__") or inspect.getsourcefile(lambda: 0)
+            if file_hint and os.path.exists(file_hint):
+                script_dir = os.path.dirname(os.path.abspath(file_hint))
+                candidate_paths.append(os.path.join(script_dir, "proxy_binding_utils.py"))
+                candidate_paths.append(os.path.join(script_dir, "rigging", "proxy_binding_utils.py"))
+            cwd = os.getcwd()
+            candidate_paths.append(os.path.join(cwd, "proxy_binding_utils.py"))
+            candidate_paths.append(os.path.join(cwd, "rigging", "proxy_binding_utils.py"))
+            blend_dir = bpy.path.abspath("//")
+            if blend_dir:
+                candidate_paths.append(os.path.join(blend_dir, "proxy_binding_utils.py"))
+                candidate_paths.append(os.path.join(blend_dir, "rigging", "proxy_binding_utils.py"))
+            checked_paths = set()
+            for module_path in candidate_paths:
+                normalized = os.path.normpath(module_path)
+                if normalized in checked_paths:
+                    continue
+                checked_paths.add(normalized)
+                if os.path.exists(normalized):
+                    spec = importlib.util.spec_from_file_location(module_name, normalized)
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    sys.modules[module_name] = module
+                    return module
+            text_name_candidates = (
+                "proxy_binding_utils.py",
+                "Rigging - proxy_binding_utils.py",
+                "proxy_binding_utils",
+                "Rigging - proxy_binding_utils",
+            )
+            for text_name in text_name_candidates:
+                text_block = bpy.data.texts.get(text_name)
+                if text_block:
+                    module = types.ModuleType(module_name)
+                    module.__file__ = text_name
+                    exec(compile(text_block.as_string(), text_name, "exec"), module.__dict__)
+                    sys.modules[module_name] = module
+                    return module
+            for text_block in bpy.data.texts:
+                if "proxy_binding_utils" in text_block.name.lower():
+                    module = types.ModuleType(module_name)
+                    module.__file__ = text_block.name
+                    exec(compile(text_block.as_string(), text_block.name, "exec"), module.__dict__)
+                    sys.modules[module_name] = module
+                    return module
+            raise RuntimeError(
+                "Could not find proxy_binding_utils.py. Set the top input variable "
+                "'proxy_binding_utils_path' to the helper file on disk, or load "
+                "proxy_binding_utils.py as a Blender text block too."
+            )
+        proxy_utils = load_proxy_binding_utils()
+        proxy_utils.PROXY_BINDING_ROOT_OVERRIDE = str(proxy_binding_cache_root).strip()
+        print("Restoring the original saved 3DGS attributes...")
+        try:
+            mesh_objects = proxy_utils.resolve_target_mesh_objects(
+                target_mode=target_mode,
+                target_obj=target_obj,
+                require_bound=True,
+                allow_all=True,
+                active_only=True,
+            )
+            for mesh_obj in mesh_objects:
+                try:
+                    rest_state = proxy_utils.restore_original_bound_state(mesh_obj)
+                    processed_count += 1
+                    processed_names.append(mesh_obj.name)
+                    print(f"Restored '{mesh_obj.name}' to its original unbound state.")
+                    print(f"Restored splats: {len(rest_state['logical_positions_local']):,}")
+                    print("The binding cache stays on disk, but live proxy updating is now disabled for this object.")
+                except Exception as exc:
+                    failed_count += 1
+                    failed_names.append(mesh_obj.name)
+                    print(f"Unbind failed for '{mesh_obj.name}': {exc}")
+            success = failed_count == 0 and processed_count > 0
+            status_message = (
+                f"Restored {processed_count} bound 3DGS object(s); failed: {failed_count}."
+            )
+            print(status_message)
+        except Exception as exc:
+            status_message = f"Proxy unbind failed: {exc}"
+            print(status_message)
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+class SNA_OT_Dgs_Render_Update_Bound_3Dgs_From_Cache_385Ec(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_update_bound_3dgs_from_cache_385ec"
+    bl_label = "3DGS Render: Update Bound 3DGS from cache"
+    bl_description = ""
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        bpy.context.scene.sna_dgs_scene_properties.rig_interval_stop = False
+
+        def delayed_DBD03():
+            sna_rig_5_apply_baked_cache_5656F('Active', None)
+            if bpy.context.scene.sna_dgs_scene_properties.rig_interval_stop:
+                return None
+            return bpy.context.scene.sna_dgs_scene_properties.rig_update_interval
+        bpy.app.timers.register(delayed_DBD03, first_interval=0.0)
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+class SNA_OT_Dgs_Render_End_Proxy_Rig_Updates_60C6A(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_end_proxy_rig_updates_60c6a"
+    bl_label = "3DGS Render: End Proxy Rig Updates"
+    bl_description = ""
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        bpy.context.scene.sna_dgs_scene_properties.rig_interval_stop = True
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+def sna_rig2_update_single_DC225():
+    proxy_binding_cache_root = bpy.context.preferences.addons[__package__].preferences.sna_cache_file_directory
+
+    deform_mode = bpy.context.scene.sna_dgs_scene_properties.rig_deform_mode
+    scale_safety_mode = bpy.context.scene.sna_dgs_scene_properties.rig_scale_safety_mode
+    update_sh_attributes = bpy.context.scene.sna_dgs_scene_properties.rig_update_sh_attributes
+    sh_quality_mode = bpy.context.scene.sna_dgs_scene_properties.rig_sh_quality_mode
+    proxy_binding_utils_path = os.path.join(os.path.dirname(__file__), 'assets', 'proxy_binding_utils.py')
+    success = None
+    import inspect
+    import sys
+    #proxy_binding_utils_path = "D:/GithubRepos/3DGS Render_Render Updates/rigging/proxy_binding_utils.py"  # Input: full path to proxy_binding_utils.py, e.g. D:/GithubRepos/3DGS Render_Render Updates/rigging/proxy_binding_utils.py
+    #proxy_binding_cache_root = "D:/GithubRepos/3DGS Render_Render Updates/rigging"  # Input: optional folder for binding cache packages; blank = blend folder if saved, otherwise system temp
+    target_mode = "Active"  # Input: Active, Input Object, or All Bound
+    target_obj = None  # Input: mesh 3DGS object pointer or object name when target_mode is Input Object
+    #deform_mode = "Elastic"  # Input: Stable, Adaptive, or Elastic
+    #scale_safety_mode = "Local Clamp"  # Input: Off, Global Clamp, or Local Clamp
+    #sh_quality_mode = "Final"  # Input: Fast (24 samples), Balanced (32 samples), or Final (48 samples)
+    #update_sh_attributes = True  # Input: True = rotate/update SH; False = keep rest SH for faster preview updates
+    success = False
+    status_message = ""
+    processed_count = 0
+    failed_count = 0
+    processed_names = []
+    failed_names = []
+
+    def load_proxy_binding_utils():
+        import bpy
+        module_name = "proxy_binding_utils"
+        candidate_paths = []
+        override_path = str(proxy_binding_utils_path).strip()
+        if override_path:
+            candidate_paths.append(os.path.abspath(bpy.path.abspath(override_path)))
+        file_hint = globals().get("__file__") or inspect.getsourcefile(lambda: 0)
+        if file_hint and os.path.exists(file_hint):
+            script_dir = os.path.dirname(os.path.abspath(file_hint))
+            candidate_paths.append(os.path.join(script_dir, "proxy_binding_utils.py"))
+            candidate_paths.append(os.path.join(script_dir, "rigging", "proxy_binding_utils.py"))
+        cwd = os.getcwd()
+        candidate_paths.append(os.path.join(cwd, "proxy_binding_utils.py"))
+        candidate_paths.append(os.path.join(cwd, "rigging", "proxy_binding_utils.py"))
+        blend_dir = bpy.path.abspath("//")
+        if blend_dir:
+            candidate_paths.append(os.path.join(blend_dir, "proxy_binding_utils.py"))
+            candidate_paths.append(os.path.join(blend_dir, "rigging", "proxy_binding_utils.py"))
+        checked_paths = set()
+        for module_path in candidate_paths:
+            normalized = os.path.normpath(module_path)
+            if normalized in checked_paths:
+                continue
+            checked_paths.add(normalized)
+            if os.path.exists(normalized):
+                spec = importlib.util.spec_from_file_location(module_name, normalized)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                sys.modules[module_name] = module
+                return module
+        text_name_candidates = (
+            "proxy_binding_utils.py",
+            "Rigging - proxy_binding_utils.py",
+            "proxy_binding_utils",
+            "Rigging - proxy_binding_utils",
+        )
+        for text_name in text_name_candidates:
+            text_block = bpy.data.texts.get(text_name)
+            if text_block:
+                module = types.ModuleType(module_name)
+                module.__file__ = text_name
+                exec(compile(text_block.as_string(), text_name, "exec"), module.__dict__)
+                sys.modules[module_name] = module
+                return module
+        for text_block in bpy.data.texts:
+            if "proxy_binding_utils" in text_block.name.lower():
+                module = types.ModuleType(module_name)
+                module.__file__ = text_block.name
+                exec(compile(text_block.as_string(), text_block.name, "exec"), module.__dict__)
+                sys.modules[module_name] = module
+                return module
+        raise RuntimeError(
+            "Could not find proxy_binding_utils.py. Set the top input variable "
+            "'proxy_binding_utils_path' to the helper file on disk, or load "
+            "proxy_binding_utils.py as a Blender text block too."
+        )
+    proxy_utils = load_proxy_binding_utils()
+    proxy_utils.PROXY_BINDING_ROOT_OVERRIDE = str(proxy_binding_cache_root).strip()
+    print("Updating bound 3DGS attributes from the current proxy mesh pose...")
+    try:
+        mesh_objects = proxy_utils.resolve_target_mesh_objects(
+            target_mode=target_mode,
+            target_obj=target_obj,
+            require_bound=True,
+            allow_all=True,
+            active_only=True,
+        )
+        for mesh_obj in mesh_objects:
+            try:
+                proxy_obj, state = proxy_utils.update_bound_3dgs_from_proxy_with_options(
+                    mesh_obj,
+
+                    deform_mode=deform_mode,
+                    scale_safety_mode=scale_safety_mode,
+                    sh_quality_mode=sh_quality_mode,
+                    update_sh_attributes=update_sh_attributes,
+                )
+                processed_count += 1
+                processed_names.append(mesh_obj.name)
+                print(f"Updated '{mesh_obj.name}' from proxy '{proxy_obj.name}'.")
+                print(f"Updated splats: {len(state['logical_positions_local']):,}")
+                print(
+                    f"Binding method: {mesh_obj.get(proxy_utils.PROXY_BINDING_METHOD_PROP, 'Volumetric')} | "
+                    f"Deform mode: {deform_mode} | Scale safety: {scale_safety_mode} | "
+                    f"SH quality: {sh_quality_mode} | Update SH: {bool(proxy_utils.normalize_update_sh_attributes(update_sh_attributes))}"
+                )
+            except Exception as exc:
+                failed_count += 1
+                failed_names.append(mesh_obj.name)
+                print(f"Update failed for '{mesh_obj.name}': {exc}")
+        success = failed_count == 0 and processed_count > 0
+        status_message = (
+            f"Updated {processed_count} bound 3DGS object(s); failed: {failed_count}."
+        )
+        print(status_message)
+    except Exception as exc:
+        status_message = f"Proxy update failed: {exc}"
+        print(status_message)
+    return success
+
+
+def sna_rig_5_apply_baked_cache_5656F(target_mode, target_obj):
+    proxy_binding_cache_root = bpy.context.preferences.addons[__package__].preferences.sna_cache_file_directory
+    target_mode = target_mode
+    target_obj = target_obj
+    proxy_binding_utils_path = os.path.join(os.path.dirname(__file__), 'assets', 'proxy_binding_utils.py')
+    success = None
+    import inspect
+    import sys
+    #proxy_binding_utils_path = "D:/GithubRepos/3DGS Render_Render Updates/rigging/proxy_binding_utils.py"  # Input: full path to proxy_binding_utils.py, e.g. D:/GithubRepos/3DGS Render_Render Updates/rigging/proxy_binding_utils.py
+    #proxy_binding_cache_root = "D:/GithubRepos/3DGS Render_Render Updates/rigging"  # Input: optional folder for binding cache packages; blank = blend folder if saved, otherwise system temp
+    #target_mode = "Active"  # Input: Active, Input Object, or All Bound
+    #target_obj = None  # Input: mesh 3DGS object pointer or object name when target_mode is Input Object
+    frame_to_apply = None  # Input: baked frame to apply; None = use current scene frame
+    raise_on_error = False  # Input: when False, missing baked frames only print status instead of raising
+    success = False
+    status_message = ""
+    sequence_available = False
+    frame_exists = False
+    applied_frame = None
+    applied_splat_count = 0
+    processed_count = 0
+    failed_count = 0
+    processed_names = []
+    failed_names = []
+
+    def load_proxy_binding_utils():
+        module_name = "proxy_binding_utils"
+        candidate_paths = []
+        override_path = str(proxy_binding_utils_path).strip()
+        if override_path:
+            candidate_paths.append(os.path.abspath(bpy.path.abspath(override_path)))
+        file_hint = globals().get("__file__") or inspect.getsourcefile(lambda: 0)
+        if file_hint and os.path.exists(file_hint):
+            script_dir = os.path.dirname(os.path.abspath(file_hint))
+            candidate_paths.append(os.path.join(script_dir, "proxy_binding_utils.py"))
+            candidate_paths.append(os.path.join(script_dir, "rigging", "proxy_binding_utils.py"))
+        cwd = os.getcwd()
+        candidate_paths.append(os.path.join(cwd, "proxy_binding_utils.py"))
+        candidate_paths.append(os.path.join(cwd, "rigging", "proxy_binding_utils.py"))
+        blend_dir = bpy.path.abspath("//")
+        if blend_dir:
+            candidate_paths.append(os.path.join(blend_dir, "proxy_binding_utils.py"))
+            candidate_paths.append(os.path.join(blend_dir, "rigging", "proxy_binding_utils.py"))
+        checked_paths = set()
+        for module_path in candidate_paths:
+            normalized = os.path.normpath(module_path)
+            if normalized in checked_paths:
+                continue
+            checked_paths.add(normalized)
+            if os.path.exists(normalized):
+                spec = importlib.util.spec_from_file_location(module_name, normalized)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                sys.modules[module_name] = module
+                return module
+        text_name_candidates = (
+            "proxy_binding_utils.py",
+            "Rigging - proxy_binding_utils.py",
+            "proxy_binding_utils",
+            "Rigging - proxy_binding_utils",
+        )
+        for text_name in text_name_candidates:
+            text_block = bpy.data.texts.get(text_name)
+            if text_block:
+                module = types.ModuleType(module_name)
+                module.__file__ = text_name
+                exec(compile(text_block.as_string(), text_name, "exec"), module.__dict__)
+                sys.modules[module_name] = module
+                return module
+        for text_block in bpy.data.texts:
+            if "proxy_binding_utils" in text_block.name.lower():
+                module = types.ModuleType(module_name)
+                module.__file__ = text_block.name
+                exec(compile(text_block.as_string(), text_block.name, "exec"), module.__dict__)
+                sys.modules[module_name] = module
+                return module
+        raise RuntimeError(
+            "Could not find proxy_binding_utils.py. Set the top input variable "
+            "'proxy_binding_utils_path' to the helper file on disk, or load "
+            "proxy_binding_utils.py as a Blender text block too."
+        )
+    proxy_utils = load_proxy_binding_utils()
+    proxy_utils.PROXY_BINDING_ROOT_OVERRIDE = str(proxy_binding_cache_root).strip()
+    current_frame = int(bpy.context.scene.frame_current if frame_to_apply is None else frame_to_apply)
+    applied_frame = current_frame
+    print(f"Applying baked 3DGS attributes for frame {current_frame}...")
+    try:
+        mesh_objects = proxy_utils.resolve_target_mesh_objects(
+            target_mode=target_mode,
+            target_obj=target_obj,
+            require_bound=True,
+            allow_all=True,
+            active_only=False,
+        )
+        single_target = len(mesh_objects) == 1
+        first_error = None
+        for mesh_obj in mesh_objects:
+            try:
+                paths, metadata, _, _ = proxy_utils.load_binding_package(mesh_obj)
+                sequence_available = sequence_available or bool(mesh_obj.get(proxy_utils.PROXY_SEQUENCE_BINDING_PROP))
+                current_frame_exists = os.path.exists(proxy_utils.bake_state_file_path(paths["bake_dir"], current_frame))
+                frame_exists = frame_exists or current_frame_exists
+                if not current_frame_exists:
+                    message = (
+                        f"No baked frame exists for frame {current_frame} on '{mesh_obj.name}'. "
+                        f"Bake the sequence first, or bake a range that includes this frame."
+                    )
+                    print(message)
+                    failed_count += 1
+                    failed_names.append(mesh_obj.name)
+                    if raise_on_error and first_error is None:
+                        first_error = proxy_utils.ProxyBindingError(message)
+                    continue
+                state = proxy_utils.apply_baked_frame_to_mesh(mesh_obj, current_frame)
+                applied_splat_count += len(state["logical_positions_local"])
+                processed_count += 1
+                processed_names.append(mesh_obj.name)
+                sequence_available = sequence_available or bool(metadata.get("baked_frames"))
+                print(f"Applied baked frame {current_frame} to '{mesh_obj.name}'.")
+                print(f"Applied splats: {len(state['logical_positions_local']):,}")
+            except Exception as exc:
+                failed_count += 1
+                failed_names.append(mesh_obj.name)
+                print(f"Apply failed for '{mesh_obj.name}': {exc}")
+                if first_error is None:
+                    first_error = exc
+        success = failed_count == 0 and processed_count > 0
+        status_message = (
+            f"Applied baked frame {current_frame} to {processed_count} 3DGS object(s); failed objects: {failed_count}."
+        )
+        print(status_message)
+        if single_target and first_error is not None and raise_on_error:
+            raise first_error
+    except Exception as exc:
+        status_message = f"Apply baked frame failed: {exc}"
+        print(status_message)
+        if raise_on_error:
+            raise
+    return success
+
+
+class SNA_OT_Dgs_Render_Clear_Rig_Cache_F38Be(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_clear_rig_cache_f38be"
+    bl_label = "3DGS Render: Clear Rig Cache"
+    bl_description = ""
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        proxy_binding_cache_root = bpy.context.preferences.addons[__package__].preferences.sna_cache_file_directory
+        proxy_binding_utils_path = os.path.join(os.path.dirname(__file__), 'assets', 'proxy_binding_utils.py')
+        import inspect
+        import sys
+        #proxy_binding_utils_path = "D:/GithubRepos/3DGS Render_Render Updates/rigging/proxy_binding_utils.py"  # Input: full path to proxy_binding_utils.py, e.g. D:/GithubRepos/3DGS Render_Render Updates/rigging/proxy_binding_utils.py
+        #proxy_binding_cache_root = "D:/GithubRepos/3DGS Render_Render Updates/rigging"  # Input: optional folder for binding cache packages; blank = blend folder if saved, otherwise system temp
+        target_mode = "Active"  # Input: Active, Input Object, or All Bound
+        target_obj = None  # Input: mesh 3DGS object pointer or object name when target_mode is Input Object
+        raise_on_error = False  # Input: when True, re-raise the first object-level error after reporting
+        success = False
+        status_message = ""
+        processed_count = 0
+        failed_count = 0
+        removed_file_count = 0
+        processed_names = []
+        failed_names = []
+
+        def load_proxy_binding_utils():
+            module_name = "proxy_binding_utils"
+            candidate_paths = []
+            override_path = str(proxy_binding_utils_path).strip()
+            if override_path:
+                candidate_paths.append(os.path.abspath(bpy.path.abspath(override_path)))
+            file_hint = globals().get("__file__") or inspect.getsourcefile(lambda: 0)
+            if file_hint and os.path.exists(file_hint):
+                script_dir = os.path.dirname(os.path.abspath(file_hint))
+                candidate_paths.append(os.path.join(script_dir, "proxy_binding_utils.py"))
+                candidate_paths.append(os.path.join(script_dir, "rigging", "proxy_binding_utils.py"))
+            cwd = os.getcwd()
+            candidate_paths.append(os.path.join(cwd, "proxy_binding_utils.py"))
+            candidate_paths.append(os.path.join(cwd, "rigging", "proxy_binding_utils.py"))
+            blend_dir = bpy.path.abspath("//")
+            if blend_dir:
+                candidate_paths.append(os.path.join(blend_dir, "proxy_binding_utils.py"))
+                candidate_paths.append(os.path.join(blend_dir, "rigging", "proxy_binding_utils.py"))
+            checked_paths = set()
+            for module_path in candidate_paths:
+                normalized = os.path.normpath(module_path)
+                if normalized in checked_paths:
+                    continue
+                checked_paths.add(normalized)
+                if os.path.exists(normalized):
+                    spec = importlib.util.spec_from_file_location(module_name, normalized)
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    sys.modules[module_name] = module
+                    return module
+            text_name_candidates = (
+                "proxy_binding_utils.py",
+                "Rigging - proxy_binding_utils.py",
+                "proxy_binding_utils",
+                "Rigging - proxy_binding_utils",
+            )
+            for text_name in text_name_candidates:
+                text_block = bpy.data.texts.get(text_name)
+                if text_block:
+                    module = types.ModuleType(module_name)
+                    module.__file__ = text_name
+                    exec(compile(text_block.as_string(), text_name, "exec"), module.__dict__)
+                    sys.modules[module_name] = module
+                    return module
+            for text_block in bpy.data.texts:
+                if "proxy_binding_utils" in text_block.name.lower():
+                    module = types.ModuleType(module_name)
+                    module.__file__ = text_block.name
+                    exec(compile(text_block.as_string(), text_block.name, "exec"), module.__dict__)
+                    sys.modules[module_name] = module
+                    return module
+            raise RuntimeError(
+                "Could not find proxy_binding_utils.py. Set the top input variable "
+                "'proxy_binding_utils_path' to the helper file on disk, or load "
+                "proxy_binding_utils.py as a Blender text block too."
+            )
+        proxy_utils = load_proxy_binding_utils()
+        proxy_utils.PROXY_BINDING_ROOT_OVERRIDE = str(proxy_binding_cache_root).strip()
+        print("Clearing baked 3DGS frame data while preserving proxy bindings...")
+        try:
+            mesh_objects = proxy_utils.resolve_target_mesh_objects(
+                target_mode=target_mode,
+                target_obj=target_obj,
+                require_bound=True,
+                allow_all=True,
+                active_only=False,
+            )
+            first_error = None
+            for mesh_obj in mesh_objects:
+                try:
+                    removed_files, metadata = proxy_utils.clear_baked_sequence_preserve_binding(mesh_obj)
+                    processed_count += 1
+                    removed_file_count += int(removed_files)
+                    processed_names.append(mesh_obj.name)
+                    print(f"Cleared baked data for '{mesh_obj.name}'.")
+                    print(f"Removed baked frame files: {removed_files}")
+                    print(f"Proxy binding preserved: {bool(mesh_obj.get(proxy_utils.PROXY_BINDING_PATH_PROP))}")
+                    print(f"Sequence active: {bool(mesh_obj.get(proxy_utils.PROXY_SEQUENCE_BINDING_PROP))}")
+                except Exception as exc:
+                    failed_count += 1
+                    failed_names.append(mesh_obj.name)
+                    print(f"Clear baked data failed for '{mesh_obj.name}': {exc}")
+                    if first_error is None:
+                        first_error = exc
+            success = failed_count == 0 and processed_count > 0
+            status_message = (
+                f"Cleared baked data on {processed_count} bound 3DGS object(s); "
+                f"removed {removed_file_count} baked frame file(s); failed objects: {failed_count}."
+            )
+            print(status_message)
+            if failed_count > 0 and raise_on_error and first_error is not None:
+                raise first_error
+        except Exception as exc:
+            status_message = f"Clear baked data failed: {exc}"
+            print(status_message)
+            if raise_on_error:
+                raise
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+def sna_rig_891FC(layout_function, ):
+    if (bpy.context.preferences.addons[__package__].preferences.sna_cache_file_directory == ''):
+        box_B8623 = layout_function.box()
+        box_B8623.alert = False
+        box_B8623.enabled = True
+        box_B8623.active = True
+        box_B8623.use_property_split = False
+        box_B8623.use_property_decorate = False
+        box_B8623.alignment = 'Expand'.upper()
+        box_B8623.scale_x = 1.0
+        box_B8623.scale_y = 1.0
+        if not True: box_B8623.operator_context = "EXEC_DEFAULT"
+        box_B8623.label(text='Cache directory is empty.', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+        box_B8623.label(text='Set it in Preferences', icon_value=0)
+    col_939A0 = layout_function.column(heading='', align=True)
+    col_939A0.alert = False
+    col_939A0.enabled = (bpy.context.preferences.addons[__package__].preferences.sna_cache_file_directory != '')
+    col_939A0.active = True
+    col_939A0.use_property_split = False
+    col_939A0.use_property_decorate = False
+    col_939A0.scale_x = 1.0
+    col_939A0.scale_y = 1.0
+    col_939A0.alignment = 'Expand'.upper()
+    col_939A0.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+    col_939A0.label(text='Binding Data', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')))
+    if (bpy.context.view_layer.objects.active == None):
+        box_D50A3 = col_939A0.box()
+        box_D50A3.alert = False
+        box_D50A3.enabled = True
+        box_D50A3.active = True
+        box_D50A3.use_property_split = False
+        box_D50A3.use_property_decorate = False
+        box_D50A3.alignment = 'Expand'.upper()
+        box_D50A3.scale_x = 1.0
+        box_D50A3.scale_y = 2.0
+        if not True: box_D50A3.operator_context = "EXEC_DEFAULT"
+        box_D50A3.label(text='No Active Object', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+    else:
+        if bpy.context.view_layer.objects.active.type == 'ARMATURE':
+            box_C4E6D = col_939A0.box()
+            box_C4E6D.alert = False
+            box_C4E6D.enabled = True
+            box_C4E6D.active = True
+            box_C4E6D.use_property_split = False
+            box_C4E6D.use_property_decorate = False
+            box_C4E6D.alignment = 'Expand'.upper()
+            box_C4E6D.scale_x = 1.0
+            box_C4E6D.scale_y = 1.0
+            if not True: box_C4E6D.operator_context = "EXEC_DEFAULT"
+            box_C4E6D.label(text='Armature Tools', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')))
+            box_C4E6D.prop(bpy.context.view_layer.objects.active.data, 'pose_position', text=bpy.context.view_layer.objects.active.data.pose_position, icon_value=0, emboss=True, expand=True)
+            op = box_C4E6D.operator('sna.dgs_render_apply_armature_pose_as_rest_pose_a8c68', text='Apply pose as Rest Pose', icon_value=0, emboss=True, depress=False)
+        else:
+            if '3DGS_Mesh_Type' in bpy.context.view_layer.objects.active:
+                if (bpy.context.view_layer.objects.active['3DGS_Mesh_Type'] == 'face'):
+                    box_A082B = col_939A0.box()
+                    box_A082B.alert = False
+                    box_A082B.enabled = True
+                    box_A082B.active = True
+                    box_A082B.use_property_split = False
+                    box_A082B.use_property_decorate = False
+                    box_A082B.alignment = 'Expand'.upper()
+                    box_A082B.scale_x = 1.0
+                    box_A082B.scale_y = 1.0
+                    if not True: box_A082B.operator_context = "EXEC_DEFAULT"
+                    box_A082B.label(text='Rigging is only available for Vert based', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+                    box_A082B.label(text='3DGS objects. You can convert this object', icon_value=0)
+                    box_A082B.label(text='from the Ctrl+A menu', icon_value=0)
+                else:
+                    col_29EE2 = col_939A0.column(heading='', align=False)
+                    col_29EE2.alert = False
+                    col_29EE2.enabled = True
+                    col_29EE2.active = True
+                    col_29EE2.use_property_split = False
+                    col_29EE2.use_property_decorate = False
+                    col_29EE2.scale_x = 1.0
+                    col_29EE2.scale_y = 1.0
+                    col_29EE2.alignment = 'Expand'.upper()
+                    col_29EE2.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                    if 'proxy_binding_active' in bpy.context.view_layer.objects.active:
+                        if bpy.context.view_layer.objects.active['proxy_binding_active']:
+                            box_B68AA = col_29EE2.box()
+                            box_B68AA.alert = True
+                            box_B68AA.enabled = True
+                            box_B68AA.active = True
+                            box_B68AA.use_property_split = False
+                            box_B68AA.use_property_decorate = False
+                            box_B68AA.alignment = 'Expand'.upper()
+                            box_B68AA.scale_x = 1.0
+                            box_B68AA.scale_y = 1.0
+                            if not True: box_B68AA.operator_context = "EXEC_DEFAULT"
+                            op = box_B68AA.operator('sna.dgs_render_unbind_from_proxy_mesh_7648d', text='Unbind', icon_value=0, emboss=True, depress=False)
+                        else:
+                            box_485E0 = col_29EE2.box()
+                            box_485E0.alert = False
+                            box_485E0.enabled = True
+                            box_485E0.active = True
+                            box_485E0.use_property_split = False
+                            box_485E0.use_property_decorate = False
+                            box_485E0.alignment = 'Expand'.upper()
+                            box_485E0.scale_x = 1.0
+                            box_485E0.scale_y = 1.0
+                            if not True: box_485E0.operator_context = "EXEC_DEFAULT"
+                            op = box_485E0.operator('sna.dgs_render_unbind_from_proxy_mesh_7648d', text='Unbind / Refresh', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'refresh.svg')), emboss=True, depress=False)
+                    box_B63D8 = col_29EE2.box()
+                    box_B63D8.alert = False
+                    box_B63D8.enabled = True
+                    box_B63D8.active = True
+                    box_B63D8.use_property_split = False
+                    box_B63D8.use_property_decorate = False
+                    box_B63D8.alignment = 'Expand'.upper()
+                    box_B63D8.scale_x = 1.0
+                    box_B63D8.scale_y = 1.0
+                    if not True: box_B63D8.operator_context = "EXEC_DEFAULT"
+                    box_B63D8.label(text='Proxy Mesh', icon_value=0)
+                    row_6ADB2 = box_B63D8.row(heading='', align=True)
+                    row_6ADB2.alert = False
+                    row_6ADB2.enabled = True
+                    row_6ADB2.active = True
+                    row_6ADB2.use_property_split = False
+                    row_6ADB2.use_property_decorate = False
+                    row_6ADB2.scale_x = 1.0
+                    row_6ADB2.scale_y = 1.0
+                    row_6ADB2.alignment = 'Expand'.upper()
+                    row_6ADB2.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                    row_6ADB2.prop(bpy.context.view_layer.objects.active.sna_dgs_object_properties, 'rig_proxy_mesh', text='', icon_value=0, emboss=True)
+                    if (bpy.context.view_layer.objects.active.sna_dgs_object_properties.rig_proxy_mesh == None):
+                        pass
+                    else:
+                        row_E7B4F = row_6ADB2.row(heading='', align=True)
+                        row_E7B4F.alert = False
+                        row_E7B4F.enabled = True
+                        row_E7B4F.active = True
+                        row_E7B4F.use_property_split = False
+                        row_E7B4F.use_property_decorate = False
+                        row_E7B4F.scale_x = 1.0
+                        row_E7B4F.scale_y = 1.0
+                        row_E7B4F.alignment = 'Expand'.upper()
+                        row_E7B4F.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                        op = row_E7B4F.operator('sna.dgs_render_select_object_b1f49', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'mouse-pointer.svg')), emboss=True, depress=False)
+                        op.sna_object_name = bpy.context.view_layer.objects.active.sna_dgs_object_properties.rig_proxy_mesh.name
+                        row_E7B4F.prop(bpy.context.view_layer.objects.active.sna_dgs_object_properties.rig_proxy_mesh, 'hide_viewport', text='', icon_value=0, emboss=True)
+                        row_E7B4F.prop(bpy.context.view_layer.objects.active.sna_dgs_object_properties.rig_proxy_mesh, 'hide_render', text='', icon_value=0, emboss=True)
+                    if (bpy.context.view_layer.objects.active.sna_dgs_object_properties.rig_proxy_mesh == None):
+                        pass
+                    else:
+                        col_29EE2.separator(factor=3.0)
+                        if 'proxy_binding_active' in bpy.context.view_layer.objects.active:
+                            if bpy.context.view_layer.objects.active['proxy_binding_active']:
+                                col_73DBB = col_29EE2.column(heading='', align=False)
+                                col_73DBB.alert = False
+                                col_73DBB.enabled = True
+                                col_73DBB.active = True
+                                col_73DBB.use_property_split = False
+                                col_73DBB.use_property_decorate = False
+                                col_73DBB.scale_x = 1.0
+                                col_73DBB.scale_y = 1.0
+                                col_73DBB.alignment = 'Expand'.upper()
+                                col_73DBB.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                                box_21FC2 = col_73DBB.box()
+                                box_21FC2.alert = False
+                                box_21FC2.enabled = True
+                                box_21FC2.active = True
+                                box_21FC2.use_property_split = False
+                                box_21FC2.use_property_decorate = False
+                                box_21FC2.alignment = 'Expand'.upper()
+                                box_21FC2.scale_x = 1.0
+                                box_21FC2.scale_y = 1.0
+                                if not True: box_21FC2.operator_context = "EXEC_DEFAULT"
+                                box_21FC2.label(text='Update Settings', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')))
+                                col_4847A = box_21FC2.column(heading='', align=True)
+                                col_4847A.alert = False
+                                col_4847A.enabled = True
+                                col_4847A.active = True
+                                col_4847A.use_property_split = False
+                                col_4847A.use_property_decorate = False
+                                col_4847A.scale_x = 1.0
+                                col_4847A.scale_y = 1.0
+                                col_4847A.alignment = 'Expand'.upper()
+                                col_4847A.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                                col_4847A.label(text='Update Mode', icon_value=0)
+                                row_88338 = col_4847A.row(heading='', align=False)
+                                row_88338.alert = False
+                                row_88338.enabled = True
+                                row_88338.active = True
+                                row_88338.use_property_split = False
+                                row_88338.use_property_decorate = False
+                                row_88338.scale_x = 1.0
+                                row_88338.scale_y = 1.0
+                                row_88338.alignment = 'Expand'.upper()
+                                row_88338.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                                row_88338.prop(bpy.context.scene.sna_dgs_scene_properties, 'rig_update_mode', text=bpy.context.scene.sna_dgs_scene_properties.rig_update_mode, icon_value=0, emboss=True, expand=True)
+                                if bpy.context.scene.sna_dgs_scene_properties.rig_update_mode == "Single":
+                                    col_2CAD4 = box_21FC2.column(heading='', align=False)
+                                    col_2CAD4.alert = False
+                                    col_2CAD4.enabled = True
+                                    col_2CAD4.active = True
+                                    col_2CAD4.use_property_split = False
+                                    col_2CAD4.use_property_decorate = False
+                                    col_2CAD4.scale_x = 1.0
+                                    col_2CAD4.scale_y = 1.0
+                                    col_2CAD4.alignment = 'Expand'.upper()
+                                    col_2CAD4.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                                    if 'proxy_sequence_binding' in bpy.context.view_layer.objects.active:
+                                        if bpy.context.view_layer.objects.active['proxy_sequence_binding']:
+                                            layout_function = col_2CAD4
+                                            sna_rig_update_settings_88DF0(layout_function, False, False)
+                                        else:
+                                            layout_function = col_2CAD4
+                                            sna_rig_update_settings_88DF0(layout_function, False, True)
+                                    else:
+                                        layout_function = col_2CAD4
+                                        sna_rig_update_settings_88DF0(layout_function, False, True)
+                                    col_2CAD4.separator(factor=1.0)
+                                    col_DF573 = col_2CAD4.column(heading='', align=False)
+                                    col_DF573.alert = False
+                                    col_DF573.enabled = True
+                                    col_DF573.active = True
+                                    col_DF573.use_property_split = False
+                                    col_DF573.use_property_decorate = False
+                                    col_DF573.scale_x = 1.0
+                                    col_DF573.scale_y = 2.0
+                                    col_DF573.alignment = 'Expand'.upper()
+                                    col_DF573.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                                    op = col_DF573.operator('sna.dgs_render_update_bound_3dgs_from_proxy_mesh_951a0', text='Update Single', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'update.svg')), emboss=True, depress=False)
+                                elif bpy.context.scene.sna_dgs_scene_properties.rig_update_mode == "Interval":
+                                    col_6A648 = box_21FC2.column(heading='', align=False)
+                                    col_6A648.alert = False
+                                    col_6A648.enabled = True
+                                    col_6A648.active = True
+                                    col_6A648.use_property_split = False
+                                    col_6A648.use_property_decorate = False
+                                    col_6A648.scale_x = 1.0
+                                    col_6A648.scale_y = 1.0
+                                    col_6A648.alignment = 'Expand'.upper()
+                                    col_6A648.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                                    if 'proxy_sequence_binding' in bpy.context.view_layer.objects.active:
+                                        if bpy.context.view_layer.objects.active['proxy_sequence_binding']:
+                                            layout_function = col_6A648
+                                            sna_rig_update_settings_88DF0(layout_function, False, False)
+                                        else:
+                                            layout_function = col_6A648
+                                            sna_rig_update_settings_88DF0(layout_function, False, True)
+                                    else:
+                                        layout_function = col_6A648
+                                        sna_rig_update_settings_88DF0(layout_function, False, True)
+                                    col_6A648.separator(factor=1.0)
+                                    box_3F9E9 = col_6A648.box()
+                                    box_3F9E9.alert = False
+                                    box_3F9E9.enabled = True
+                                    box_3F9E9.active = True
+                                    box_3F9E9.use_property_split = False
+                                    box_3F9E9.use_property_decorate = False
+                                    box_3F9E9.alignment = 'Expand'.upper()
+                                    box_3F9E9.scale_x = 1.0
+                                    box_3F9E9.scale_y = 1.0
+                                    if not True: box_3F9E9.operator_context = "EXEC_DEFAULT"
+                                    if 'proxy_sequence_binding' in bpy.context.view_layer.objects.active:
+                                        if bpy.context.view_layer.objects.active['proxy_sequence_binding']:
+                                            layout_function = box_3F9E9
+                                            sna_rig_cache_frames_993DF(layout_function, False)
+                                        else:
+                                            layout_function = box_3F9E9
+                                            sna_rig_cache_frames_993DF(layout_function, True)
+                                    else:
+                                        layout_function = box_3F9E9
+                                        sna_rig_cache_frames_993DF(layout_function, True)
+                                    if 'proxy_sequence_binding' in bpy.context.view_layer.objects.active:
+                                        if bpy.context.view_layer.objects.active['proxy_sequence_binding']:
+                                            pass
+                                        else:
+                                            col_55551 = box_3F9E9.column(heading='', align=False)
+                                            col_55551.alert = False
+                                            col_55551.enabled = True
+                                            col_55551.active = True
+                                            col_55551.use_property_split = False
+                                            col_55551.use_property_decorate = False
+                                            col_55551.scale_x = 1.0
+                                            col_55551.scale_y = 2.0
+                                            col_55551.alignment = 'Expand'.upper()
+                                            col_55551.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                                            op = col_55551.operator('sna.dgs_render_bake_frames_to_cache_90885', text='Bake Frames to Cache', icon_value=0, emboss=True, depress=False)
+                                    else:
+                                        col_A92B7 = box_3F9E9.column(heading='', align=False)
+                                        col_A92B7.alert = False
+                                        col_A92B7.enabled = True
+                                        col_A92B7.active = True
+                                        col_A92B7.use_property_split = False
+                                        col_A92B7.use_property_decorate = False
+                                        col_A92B7.scale_x = 1.0
+                                        col_A92B7.scale_y = 2.0
+                                        col_A92B7.alignment = 'Expand'.upper()
+                                        col_A92B7.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                                        op = col_A92B7.operator('sna.dgs_render_bake_frames_to_cache_90885', text='Bake Frames to Cache', icon_value=0, emboss=True, depress=False)
+                                    if 'proxy_sequence_binding' in bpy.context.view_layer.objects.active:
+                                        if bpy.context.view_layer.objects.active['proxy_sequence_binding']:
+                                            box_0905C = col_6A648.box()
+                                            box_0905C.alert = False
+                                            box_0905C.enabled = True
+                                            box_0905C.active = True
+                                            box_0905C.use_property_split = False
+                                            box_0905C.use_property_decorate = False
+                                            box_0905C.alignment = 'Expand'.upper()
+                                            box_0905C.scale_x = 1.0
+                                            box_0905C.scale_y = 1.0
+                                            if not True: box_0905C.operator_context = "EXEC_DEFAULT"
+                                            col_935FA = box_0905C.column(heading='', align=True)
+                                            col_935FA.alert = False
+                                            col_935FA.enabled = True
+                                            col_935FA.active = True
+                                            col_935FA.use_property_split = False
+                                            col_935FA.use_property_decorate = False
+                                            col_935FA.scale_x = 1.0
+                                            col_935FA.scale_y = 1.0
+                                            col_935FA.alignment = 'Expand'.upper()
+                                            col_935FA.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                                            col_935FA.prop(bpy.context.scene.sna_dgs_scene_properties, 'rig_update_interval', text='Update Interval', icon_value=0, emboss=True)
+                                            col_16CA7 = col_935FA.column(heading='', align=False)
+                                            col_16CA7.alert = False
+                                            col_16CA7.enabled = True
+                                            col_16CA7.active = True
+                                            col_16CA7.use_property_split = False
+                                            col_16CA7.use_property_decorate = False
+                                            col_16CA7.scale_x = 1.0
+                                            col_16CA7.scale_y = 2.0
+                                            col_16CA7.alignment = 'Expand'.upper()
+                                            col_16CA7.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                                            if bpy.context.scene.sna_dgs_scene_properties.rig_interval_stop:
+                                                op = col_16CA7.operator('sna.dgs_render_update_bound_3dgs_from_cache_385ec', text='Update from cache', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'play.svg')), emboss=True, depress=False)
+                                            else:
+                                                col_BE41C = col_16CA7.column(heading='', align=False)
+                                                col_BE41C.alert = True
+                                                col_BE41C.enabled = True
+                                                col_BE41C.active = True
+                                                col_BE41C.use_property_split = False
+                                                col_BE41C.use_property_decorate = False
+                                                col_BE41C.scale_x = 1.0
+                                                col_BE41C.scale_y = 1.0
+                                                col_BE41C.alignment = 'Expand'.upper()
+                                                col_BE41C.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+                                                op = col_BE41C.operator('sna.dgs_render_end_proxy_rig_updates_60c6a', text='Stop', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'stop.svg')), emboss=True, depress=False)
+                                else:
+                                    pass
+                                col_73DBB.separator(factor=1.0)
+                                if 'proxy_sequence_binding' in bpy.context.view_layer.objects.active:
+                                    if bpy.context.view_layer.objects.active['proxy_sequence_binding']:
+                                        if 'rig_baked_render_enabled' in bpy.context.view_layer.objects.active:
+                                            box_0F4AD = col_73DBB.box()
+                                            box_0F4AD.alert = False
+                                            box_0F4AD.enabled = True
+                                            box_0F4AD.active = True
+                                            box_0F4AD.use_property_split = False
+                                            box_0F4AD.use_property_decorate = False
+                                            box_0F4AD.alignment = 'Expand'.upper()
+                                            box_0F4AD.scale_x = 1.0
+                                            box_0F4AD.scale_y = 1.0
+                                            if not True: box_0F4AD.operator_context = "EXEC_DEFAULT"
+                                            box_0F4AD.label(text='Rig Render Settings', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')))
+                                            attr_003BE = '["' + str('rig_baked_render_enabled' + '"]') 
+                                            box_0F4AD.prop(bpy.context.view_layer.objects.active, attr_003BE, text='Enable rig updates in renders', icon_value=0, emboss=True)
+                                else:
+                                    layout_function = col_73DBB
+                                    sna_rig_cache_frames_993DF(layout_function, True)
+                            else:
+                                layout_function = col_29EE2
+                                sna_bind_and_misc_tools_C36C1(layout_function, )
+                        else:
+                            layout_function = col_29EE2
+                            sna_bind_and_misc_tools_C36C1(layout_function, )
+            else:
+                box_958E5 = col_939A0.box()
+                box_958E5.alert = False
+                box_958E5.enabled = True
+                box_958E5.active = True
+                box_958E5.use_property_split = False
+                box_958E5.use_property_decorate = False
+                box_958E5.alignment = 'Expand'.upper()
+                box_958E5.scale_x = 1.0
+                box_958E5.scale_y = 2.0
+                if not True: box_958E5.operator_context = "EXEC_DEFAULT"
+                box_958E5.label(text='The Active Object is not a 3DGS Mesh', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+
+
+def sna_bind_and_misc_tools_C36C1(layout_function, ):
+    box_D0924 = layout_function.box()
+    box_D0924.alert = False
+    box_D0924.enabled = True
+    box_D0924.active = True
+    box_D0924.use_property_split = False
+    box_D0924.use_property_decorate = False
+    box_D0924.alignment = 'Expand'.upper()
+    box_D0924.scale_x = 1.0
+    box_D0924.scale_y = 1.0
+    if not True: box_D0924.operator_context = "EXEC_DEFAULT"
+    box_D0924.label(text='Bind', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')))
+    box_D0924.prop(bpy.context.scene.sna_dgs_scene_properties, 'rig_bind_method', text='', icon_value=0, emboss=True)
+    if (bpy.context.scene.sna_dgs_scene_properties.rig_bind_method == 'Hybrid'):
+        box_D0924.prop(bpy.context.scene.sna_dgs_scene_properties, 'rig_surface_dist_factor', text='Hybrid Distance Factor', icon_value=0, emboss=True)
+    box_D0924.prop(bpy.context.scene.sna_dgs_scene_properties, 'rig_bind_samples', text='Bind Samples', icon_value=0, emboss=True)
+    col_A97C8 = box_D0924.column(heading='', align=False)
+    col_A97C8.alert = False
+    col_A97C8.enabled = True
+    col_A97C8.active = True
+    col_A97C8.use_property_split = False
+    col_A97C8.use_property_decorate = False
+    col_A97C8.scale_x = 1.0
+    col_A97C8.scale_y = 2.0
+    col_A97C8.alignment = 'Expand'.upper()
+    col_A97C8.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+    op = col_A97C8.operator('sna.dgs_render_bind_to_proxy_mesh_6c58f', text='Bind to Proxy Mesh', icon_value=0, emboss=True, depress=False)
+
+
+class SNA_OT_Dgs_Render_Apply_Armature_Pose_As_Rest_Pose_A8C68(bpy.types.Operator):
+    bl_idname = "sna.dgs_render_apply_armature_pose_as_rest_pose_a8c68"
+    bl_label = "3DGS Render: Apply armature pose as Rest Pose"
+    bl_description = ""
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.app.version >= (3, 0, 0) and True:
+            cls.poll_message_set('')
+        return not False
+
+    def execute(self, context):
+        """Bake an armature's current pose into the rest pose without losing animation.
+        This script avoids direct F-Curve access so it stays resilient across Blender's
+        legacy action system and Blender 5.x slotted actions.
+        """
+        import bpy
+        # ---------------------------------------------------------------------------
+        # Inputs
+        # ---------------------------------------------------------------------------
+        # Armature object to process. Leave blank to use the active armature, or the
+        # first armature in the file if no active armature is available.
+        ARMATURE_NAME = ""
+        # Frame whose current pose should become the new rest pose.
+        # Use None to keep the current frame's live visible pose, including unkeyed edits.
+        APPLY_FRAME = None
+        # Bake range source:
+        # "ACTIVE_ACTION" uses the currently assigned action on the armature.
+        # "SCENE" uses the full scene timeline.
+        # "CUSTOM" uses FRAME_START and FRAME_END below.
+        FRAME_RANGE_MODE = "ACTIVE_ACTION"
+        # Custom bake range. These are only used when FRAME_RANGE_MODE = "CUSTOM".
+        FRAME_START = None
+        FRAME_END = None
+        # If True, only selected pose bones are applied as rest pose. The bake still
+        # rekeys every pose bone so downstream children stay visually stable.
+        USE_SELECTED_BONES_ONLY = False
+        # If True, also rebake objects that visually depend on this armature, such as
+        # children, bone-parented props, constraint-driven child objects, and meshes
+        # deformed by this armature.
+        BAKE_DEPENDENT_OBJECTS = True
+        # Bake into a fresh action by default so the original action asset is preserved.
+        CREATE_NEW_ACTION = True
+        NEW_ACTION_NAME = ""
+        NEW_ACTION_SUFFIX = "_rest_pose_baked"
+        # Disable NLA evaluation after the bake so the result is driven only by the
+        # baked action. Turn this off if you intentionally want to keep NLA mixing live.
+        DISABLE_NLA_AFTER_BAKE = True
+        # Re-applying cached matrices more than once can help some dependency chains
+        # settle after the new rest pose is applied.
+        MATRIX_APPLY_PASSES = 2
+        # Re-applying dependent object world matrices can help parented object chains
+        # settle after the armature pose has been restored for the current frame.
+        OBJECT_MATRIX_APPLY_PASSES = 1
+        # Enable verbose console logging.
+        DEBUG_LOG = True
+        # ---------------------------------------------------------------------------
+        # Outputs
+        # ---------------------------------------------------------------------------
+        OUT_SUCCESS = False
+        OUT_MESSAGE = ""
+        OUT_ARMATURE_NAME = ""
+        OUT_ACTION_NAME = ""
+        OUT_FRAME_START = 0
+        OUT_FRAME_END = 0
+        OUT_BONE_COUNT = 0
+        OUT_FRAME_COUNT = 0
+        OUT_DEPENDENT_OBJECT_COUNT = 0
+        OUT_DEFORMED_MESH_COUNT = 0
+        OUT_FRAME_RANGE_SOURCE = ""
+
+        def log(message):
+            if DEBUG_LOG:
+                print(f"[rest-pose-bake] {message}")
+
+        def _resolve_armature(context, armature_name):
+            if armature_name:
+                armature_obj = bpy.data.objects.get(armature_name)
+                if armature_obj is None:
+                    raise ValueError(f'Armature "{armature_name}" was not found.')
+                if armature_obj.type != "ARMATURE":
+                    raise ValueError(f'Object "{armature_name}" is not an armature.')
+                return armature_obj
+            active_object = context.view_layer.objects.active
+            if active_object and active_object.type == "ARMATURE":
+                return active_object
+            for obj in bpy.data.objects:
+                if obj.type == "ARMATURE":
+                    return obj
+            raise ValueError("No armature object was found in the current file.")
+
+        def _resolve_action_frame_range(armature_obj):
+            anim_data = armature_obj.animation_data
+            if anim_data is None or anim_data.action is None:
+                return None
+            action = anim_data.action
+            for attr_name in ("curve_frame_range", "frame_range"):
+                try:
+                    action_range = getattr(action, attr_name)
+                except Exception:
+                    continue
+                if action_range is None or len(action_range) < 2:
+                    continue
+                try:
+                    frame_start = float(action_range[0])
+                    frame_end = float(action_range[1])
+                except Exception:
+                    continue
+                if not math.isfinite(frame_start) or not math.isfinite(frame_end):
+                    continue
+                frame_start = int(math.floor(frame_start))
+                frame_end = int(math.ceil(frame_end))
+                if frame_end < frame_start:
+                    continue
+                return frame_start, frame_end
+            return None
+
+        def _resolve_frame_range(scene, armature_obj):
+            range_mode = str(FRAME_RANGE_MODE).strip().upper()
+            if range_mode == "CUSTOM":
+                if FRAME_START is None or FRAME_END is None:
+                    raise ValueError(
+                        'FRAME_RANGE_MODE is "CUSTOM", but FRAME_START/FRAME_END are not both set.'
+                    )
+                frame_start = int(FRAME_START)
+                frame_end = int(FRAME_END)
+                range_source = "CUSTOM"
+            elif range_mode == "SCENE":
+                frame_start = int(scene.frame_start)
+                frame_end = int(scene.frame_end)
+                range_source = "SCENE"
+            elif range_mode == "ACTIVE_ACTION":
+                action_range = _resolve_action_frame_range(armature_obj)
+                if action_range is None:
+                    frame_start = int(scene.frame_start)
+                    frame_end = int(scene.frame_end)
+                    range_source = "SCENE_FALLBACK"
+                    log(
+                        "No usable active action frame range was found; "
+                        "falling back to the scene timeline."
+                    )
+                else:
+                    frame_start, frame_end = action_range
+                    range_source = "ACTIVE_ACTION"
+            else:
+                raise ValueError(
+                    f'Unsupported FRAME_RANGE_MODE "{FRAME_RANGE_MODE}". '
+                    'Use "ACTIVE_ACTION", "SCENE", or "CUSTOM".'
+                )
+            if frame_end < frame_start:
+                raise ValueError(
+                    f"Invalid frame range: start={frame_start}, end={frame_end}."
+                )
+            return frame_start, frame_end, range_source
+
+        def _resolve_apply_frame(scene):
+            return int(scene.frame_current if APPLY_FRAME is None else APPLY_FRAME)
+
+        def _bone_depth(pose_bone):
+            depth = 0
+            current = pose_bone.parent
+            while current is not None:
+                depth += 1
+                current = current.parent
+            return depth
+
+        def _ordered_pose_bones(armature_obj):
+            return sorted(armature_obj.pose.bones, key=lambda bone: (_bone_depth(bone), bone.name))
+
+        def _rotation_data_path(rotation_mode):
+            if rotation_mode == "QUATERNION":
+                return "rotation_quaternion"
+            if rotation_mode == "AXIS_ANGLE":
+                return "rotation_axis_angle"
+            return "rotation_euler"
+
+        def _set_active_armature(context, armature_obj):
+            view_layer = context.view_layer
+            try:
+                for obj in view_layer.objects:
+                    obj.select_set(False)
+            except Exception:
+                pass
+            armature_obj.select_set(True)
+            view_layer.objects.active = armature_obj
+
+        def _enter_pose_mode(context, armature_obj):
+            _set_active_armature(context, armature_obj)
+            if armature_obj.mode != "POSE":
+                bpy.ops.object.mode_set(mode="POSE")
+
+        def _selected_pose_bone_names(context, armature_obj):
+            _enter_pose_mode(context, armature_obj)
+            selected_pose_bones = getattr(
+                context, "selected_pose_bones_from_active_object", None
+            )
+            if selected_pose_bones is None:
+                selected_pose_bones = getattr(context, "selected_pose_bones", None)
+            if selected_pose_bones is not None:
+                return [pose_bone.name for pose_bone in selected_pose_bones]
+            selected_names = []
+            for pose_bone in armature_obj.pose.bones:
+                select_flag = getattr(pose_bone.bone, "select", None)
+                if select_flag:
+                    selected_names.append(pose_bone.name)
+            return selected_names
+
+        def _capture_visual_pose_matrices(context, armature_obj, ordered_bone_names):
+            depsgraph = context.evaluated_depsgraph_get()
+            context.view_layer.update()
+            evaluated_obj = armature_obj.evaluated_get(depsgraph)
+            return {
+                bone_name: evaluated_obj.pose.bones[bone_name].matrix.copy()
+                for bone_name in ordered_bone_names
+            }
+
+        def _cache_visual_matrices(
+            context,
+            armature_obj,
+            ordered_bone_names,
+            frame_start,
+            frame_end,
+            frame_overrides=None,
+        ):
+            scene = context.scene
+            depsgraph = context.evaluated_depsgraph_get()
+            cached_matrices = {}
+            for frame in range(frame_start, frame_end + 1):
+                if frame_overrides and frame in frame_overrides:
+                    cached_matrices[frame] = {
+                        bone_name: frame_overrides[frame][bone_name].copy()
+                        for bone_name in ordered_bone_names
+                    }
+                    continue
+                scene.frame_set(frame)
+                context.view_layer.update()
+                evaluated_obj = armature_obj.evaluated_get(depsgraph)
+                cached_matrices[frame] = {
+                    bone_name: evaluated_obj.pose.bones[bone_name].matrix.copy()
+                    for bone_name in ordered_bone_names
+                }
+            return cached_matrices
+
+        def _object_depth(obj):
+            depth = 0
+            current = obj.parent
+            while current is not None:
+                depth += 1
+                current = current.parent
+            return depth
+
+        def _descends_from_object(obj, ancestor_obj):
+            current = obj.parent
+            while current is not None:
+                if current == ancestor_obj:
+                    return True
+                current = current.parent
+            return False
+
+        def _uses_armature_constraints(obj, armature_obj):
+            for constraint in obj.constraints:
+                if getattr(constraint, "target", None) == armature_obj:
+                    return True
+            return False
+
+        def _armature_modifiers_for_object(obj, armature_obj):
+            matching_modifiers = []
+            for modifier in obj.modifiers:
+                if modifier.type != "ARMATURE":
+                    continue
+                if getattr(modifier, "object", None) == armature_obj:
+                    matching_modifiers.append(modifier)
+            return matching_modifiers
+
+        def _collect_dependent_objects(armature_obj):
+            transform_dependents = []
+
+            deformed_meshes = []
+            for obj in bpy.data.objects:
+                if obj == armature_obj:
+                    continue
+                has_armature_modifier = bool(_armature_modifiers_for_object(obj, armature_obj))
+                if has_armature_modifier:
+
+                    deformed_meshes.append(obj)
+                if _descends_from_object(obj, armature_obj) or _uses_armature_constraints(
+                    obj, armature_obj
+                ):
+                    if not has_armature_modifier:
+                        transform_dependents.append(obj)
+            transform_dependents = sorted(
+                transform_dependents,
+                key=lambda obj: (_object_depth(obj), obj.name),
+            )
+
+            deformed_meshes = sorted(
+
+                deformed_meshes,
+                key=lambda obj: (_object_depth(obj), obj.name),
+            )
+            return transform_dependents, deformed_meshes
+
+        def _capture_object_world_matrices(context, objects):
+            depsgraph = context.evaluated_depsgraph_get()
+            context.view_layer.update()
+            cached_matrices = {}
+            for obj in objects:
+                evaluated_obj = obj.evaluated_get(depsgraph)
+                cached_matrices[obj.name] = evaluated_obj.matrix_world.copy()
+            return cached_matrices
+
+        def _cache_object_world_matrices(
+            context,
+            objects,
+            frame_start,
+            frame_end,
+            frame_overrides=None,
+        ):
+            if not objects:
+                return {}
+            scene = context.scene
+            depsgraph = context.evaluated_depsgraph_get()
+            cached_matrices = {}
+            for frame in range(frame_start, frame_end + 1):
+                if frame_overrides and frame in frame_overrides:
+                    cached_matrices[frame] = {
+                        obj_name: frame_overrides[frame][obj_name].copy()
+                        for obj_name in frame_overrides[frame]
+                    }
+                    continue
+                scene.frame_set(frame)
+                context.view_layer.update()
+                cached_matrices[frame] = {}
+                for obj in objects:
+                    evaluated_obj = obj.evaluated_get(depsgraph)
+                    cached_matrices[frame][obj.name] = evaluated_obj.matrix_world.copy()
+            return cached_matrices
+
+        def _ensure_single_user_mesh_data(obj):
+            if obj.type != "MESH":
+                raise ValueError(f'Object "{obj.name}" is not a mesh.')
+            if obj.data.users > 1:
+                obj.data = obj.data.copy()
+
+        def _capture_deformed_mesh_data(context, mesh_objects):
+            depsgraph = context.evaluated_depsgraph_get()
+            mesh_snapshots = {}
+            for obj in mesh_objects:
+                if obj.type != "MESH":
+                    continue
+                if obj.data.shape_keys and len(obj.data.shape_keys.key_blocks) > 1:
+                    raise ValueError(
+                        f'Mesh "{obj.name}" has shape keys; this script does not yet '
+                        "support rewriting armature-driven mesh basis data with shape keys present."
+                    )
+                evaluated_obj = obj.evaluated_get(depsgraph)
+                temp_mesh = evaluated_obj.to_mesh()
+                try:
+                    if len(temp_mesh.vertices) != len(obj.data.vertices):
+                        raise ValueError(
+                            f'Mesh "{obj.name}" changes topology during evaluation, so its '
+                            "basis mesh cannot be rewritten safely."
+                        )
+                    mesh_snapshots[obj.name] = [vertex.co.copy() for vertex in temp_mesh.vertices]
+                finally:
+                    evaluated_obj.to_mesh_clear()
+            return mesh_snapshots
+
+        def _apply_deformed_mesh_data(mesh_objects, mesh_snapshots):
+            for obj in mesh_objects:
+                if obj.name not in mesh_snapshots:
+                    continue
+                _ensure_single_user_mesh_data(obj)
+                vertex_positions = mesh_snapshots[obj.name]
+                for index, vertex in enumerate(obj.data.vertices):
+                    vertex.co = vertex_positions[index]
+                obj.data.update()
+
+        def _create_baked_action(anim_owner, custom_name=""):
+            if anim_owner.animation_data is None:
+                anim_owner.animation_data_create()
+            original_action = anim_owner.animation_data.action
+            if not CREATE_NEW_ACTION and original_action is not None:
+                return original_action
+            if custom_name:
+                action_name = custom_name
+            elif original_action is not None:
+                action_name = f"{original_action.name}{NEW_ACTION_SUFFIX}"
+            else:
+                action_name = f"{anim_owner.name}{NEW_ACTION_SUFFIX}"
+            baked_action = bpy.data.actions.new(action_name)
+            anim_owner.animation_data.action = baked_action
+            return baked_action
+
+        def _keyframe_transform_owner(
+            transform_owner,
+            frame,
+            group_name=None,
+            use_visual_keying=True,
+        ):
+            key_kwargs = {
+                "frame": frame,
+            }
+            if group_name is not None:
+                key_kwargs["group"] = group_name
+            if use_visual_keying:
+                key_kwargs["options"] = {"INSERTKEY_VISUAL"}
+            transform_owner.keyframe_insert(
+                data_path="location",
+                **key_kwargs,
+            )
+            transform_owner.keyframe_insert(
+                data_path="scale",
+                **key_kwargs,
+            )
+            transform_owner.keyframe_insert(
+                data_path=_rotation_data_path(transform_owner.rotation_mode),
+                **key_kwargs,
+            )
+
+        def _apply_cached_frame(context, armature_obj, ordered_bone_names, frame_cache):
+            for _ in range(max(1, int(MATRIX_APPLY_PASSES))):
+                for bone_name in ordered_bone_names:
+                    pose_bone = armature_obj.pose.bones[bone_name]
+                    target_pose_matrix = frame_cache[bone_name]
+                    if pose_bone.parent is None:
+                        local_pose_matrix = pose_bone.bone.convert_local_to_pose(
+                            target_pose_matrix,
+                            pose_bone.bone.matrix_local,
+                            invert=True,
+                        )
+                    else:
+                        local_pose_matrix = pose_bone.bone.convert_local_to_pose(
+                            target_pose_matrix,
+                            pose_bone.bone.matrix_local,
+                            parent_matrix=frame_cache[pose_bone.parent.name],
+                            parent_matrix_local=pose_bone.parent.bone.matrix_local,
+                            invert=True,
+                        )
+                    pose_bone.matrix_basis = local_pose_matrix
+                context.view_layer.update()
+
+        def _apply_dependent_object_matrices(context, dependent_objects, frame_cache):
+            for _ in range(max(1, int(OBJECT_MATRIX_APPLY_PASSES))):
+                for obj in dependent_objects:
+                    obj.matrix_world = frame_cache[obj.name]
+                context.view_layer.update()
+        # Serpens often executes script bodies through exec()-style contexts instead of
+        # running them as __main__, so the primary execution path lives at top level.
+        RESULT = {}
+        try:
+            context = bpy.context
+            scene = context.scene
+            original_frame = scene.frame_current
+            armature_obj = _resolve_armature(context, ARMATURE_NAME)
+            if armature_obj.library is not None:
+                raise ValueError(
+                    f'Armature "{armature_obj.name}" is linked from a library and is not editable.'
+                )
+            frame_start, frame_end, frame_range_source = _resolve_frame_range(
+                scene,
+                armature_obj,
+            )
+            apply_frame = _resolve_apply_frame(scene)
+            ordered_bone_names = [
+                pose_bone.name for pose_bone in _ordered_pose_bones(armature_obj)
+            ]
+            transform_dependent_objects = []
+
+            deformed_mesh_objects = []
+            if BAKE_DEPENDENT_OBJECTS:
+                (
+                    transform_dependent_objects,
+
+                    deformed_mesh_objects,
+                ) = _collect_dependent_objects(armature_obj)
+            selected_bone_names = _selected_pose_bone_names(context, armature_obj)
+            if USE_SELECTED_BONES_ONLY and not selected_bone_names:
+                raise ValueError(
+                    "USE_SELECTED_BONES_ONLY is enabled, but no pose bones are selected."
+                )
+            original_use_nla = False
+            if armature_obj.animation_data is not None:
+                original_use_nla = bool(getattr(armature_obj.animation_data, "use_nla", False))
+            current_pose_override = None
+            pose_frame_overrides = None
+            current_object_override = None
+            object_frame_overrides = None
+            if APPLY_FRAME is None:
+                current_pose_override = _capture_visual_pose_matrices(
+                    context,
+                    armature_obj,
+                    ordered_bone_names,
+                )
+                if frame_start <= original_frame <= frame_end:
+                    pose_frame_overrides = {original_frame: current_pose_override}
+                if transform_dependent_objects:
+                    current_object_override = _capture_object_world_matrices(
+                        context,
+                        transform_dependent_objects,
+                    )
+                    if frame_start <= original_frame <= frame_end:
+                        object_frame_overrides = {original_frame: current_object_override}
+            cached_matrices = _cache_visual_matrices(
+                context,
+                armature_obj,
+                ordered_bone_names,
+                frame_start,
+                frame_end,
+                frame_overrides=pose_frame_overrides,
+            )
+            cached_object_matrices = _cache_object_world_matrices(
+                context,
+                transform_dependent_objects,
+                frame_start,
+                frame_end,
+                frame_overrides=object_frame_overrides,
+            )
+            log(
+                f'Caching complete for "{armature_obj.name}" across '
+                f"{frame_start}-{frame_end} ({len(ordered_bone_names)} bones)."
+            )
+            _enter_pose_mode(context, armature_obj)
+            scene.frame_set(apply_frame)
+            context.view_layer.update()
+            if current_pose_override is not None:
+                _apply_cached_frame(
+                    context,
+                    armature_obj,
+                    ordered_bone_names,
+                    current_pose_override,
+                )
+            if deformed_mesh_objects:
+
+                deformed_mesh_snapshots = _capture_deformed_mesh_data(
+                    context,
+
+                    deformed_mesh_objects,
+                )
+                _apply_deformed_mesh_data(deformed_mesh_objects, deformed_mesh_snapshots)
+                context.view_layer.update()
+            log(f"Applying current pose as rest pose on frame {apply_frame}.")
+            bpy.ops.pose.armature_apply(selected=USE_SELECTED_BONES_ONLY)
+            baked_action = _create_baked_action(armature_obj, custom_name=NEW_ACTION_NAME)
+            if DISABLE_NLA_AFTER_BAKE and armature_obj.animation_data is not None:
+                try:
+                    armature_obj.animation_data.use_nla = False
+                except Exception:
+                    pass
+            for dependent_obj in transform_dependent_objects:
+                _create_baked_action(dependent_obj)
+                if DISABLE_NLA_AFTER_BAKE and dependent_obj.animation_data is not None:
+                    try:
+                        dependent_obj.animation_data.use_nla = False
+                    except Exception:
+                        pass
+            for frame in range(frame_start, frame_end + 1):
+                scene.frame_set(frame)
+                context.view_layer.update()
+                _apply_cached_frame(
+                    context,
+                    armature_obj,
+                    ordered_bone_names,
+                    cached_matrices[frame],
+                )
+                for bone_name in ordered_bone_names:
+                    _keyframe_transform_owner(
+                        armature_obj.pose.bones[bone_name],
+                        frame,
+                        group_name=bone_name,
+                        use_visual_keying=True,
+                    )
+                if transform_dependent_objects:
+                    _apply_dependent_object_matrices(
+                        context,
+                        transform_dependent_objects,
+                        cached_object_matrices[frame],
+                    )
+                    for dependent_obj in transform_dependent_objects:
+                        _keyframe_transform_owner(
+                            dependent_obj,
+                            frame,
+                            use_visual_keying=False,
+                        )
+            scene.frame_set(original_frame)
+            context.view_layer.update()
+            _enter_pose_mode(context, armature_obj)
+            RESULT = {
+                "success": True,
+                "message": (
+                    f'Applied a new rest pose to "{armature_obj.name}" and baked '
+                    f"{frame_end - frame_start + 1} frames into action "
+                    f'"{baked_action.name}".'
+                ),
+                "armature_name": armature_obj.name,
+                "action_name": baked_action.name,
+                "frame_start": frame_start,
+                "frame_end": frame_end,
+                "bone_count": len(ordered_bone_names),
+                "frame_count": frame_end - frame_start + 1,
+                "dependent_object_count": len(transform_dependent_objects),
+                "deformed_mesh_count": len(deformed_mesh_objects),
+                "frame_range_source": frame_range_source,
+                "selected_bones_were_used": USE_SELECTED_BONES_ONLY,
+                "selected_bone_count": len(selected_bone_names),
+                "original_use_nla": original_use_nla,
+            }
+            OUT_SUCCESS = bool(RESULT["success"])
+            OUT_MESSAGE = RESULT["message"]
+            OUT_ARMATURE_NAME = RESULT["armature_name"]
+            OUT_ACTION_NAME = RESULT["action_name"]
+            OUT_FRAME_START = int(RESULT["frame_start"])
+            OUT_FRAME_END = int(RESULT["frame_end"])
+            OUT_BONE_COUNT = int(RESULT["bone_count"])
+            OUT_FRAME_COUNT = int(RESULT["frame_count"])
+            OUT_DEPENDENT_OBJECT_COUNT = int(RESULT["dependent_object_count"])
+            OUT_DEFORMED_MESH_COUNT = int(RESULT["deformed_mesh_count"])
+            OUT_FRAME_RANGE_SOURCE = RESULT["frame_range_source"]
+            log(RESULT["message"])
+        except Exception as exc:
+            OUT_SUCCESS = False
+            OUT_MESSAGE = f"{type(exc).__name__}: {exc}"
+            OUT_ARMATURE_NAME = ""
+            OUT_ACTION_NAME = ""
+            OUT_FRAME_START = 0
+            OUT_FRAME_END = 0
+            OUT_BONE_COUNT = 0
+            OUT_FRAME_COUNT = 0
+            OUT_DEPENDENT_OBJECT_COUNT = 0
+            OUT_DEFORMED_MESH_COUNT = 0
+            OUT_FRAME_RANGE_SOURCE = ""
+            RESULT = {
+                "success": False,
+                "message": OUT_MESSAGE,
+            }
+            log(f"ERROR: {OUT_MESSAGE}")
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+def sna_rig_update_settings_88DF0(layout_function, alert, enabled):
+    if 'proxy_sequence_binding' in bpy.context.view_layer.objects.active:
+        if bpy.context.view_layer.objects.active['proxy_sequence_binding']:
+            box_3ABA6 = layout_function.box()
+            box_3ABA6.alert = True
+            box_3ABA6.enabled = True
+            box_3ABA6.active = True
+            box_3ABA6.use_property_split = False
+            box_3ABA6.use_property_decorate = False
+            box_3ABA6.alignment = 'Expand'.upper()
+            box_3ABA6.scale_x = 1.0
+            box_3ABA6.scale_y = 1.0
+            if not True: box_3ABA6.operator_context = "EXEC_DEFAULT"
+            box_3ABA6.label(text='Active Object has baked data', icon_value=load_preview_icon(''))
+            op = box_3ABA6.operator('sna.dgs_render_clear_rig_cache_f38be', text='Clear Cache', icon_value=0, emboss=True, depress=False)
+    col_8A21A = layout_function.column(heading='', align=True)
+    col_8A21A.alert = alert
+    col_8A21A.enabled = enabled
+    col_8A21A.active = True
+    col_8A21A.use_property_split = False
+    col_8A21A.use_property_decorate = False
+    col_8A21A.scale_x = 1.0
+    col_8A21A.scale_y = 1.0
+    col_8A21A.alignment = 'Expand'.upper()
+    col_8A21A.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+    col_8A21A.label(text='Deform Mode', icon_value=0)
+    col_8A21A.prop(bpy.context.scene.sna_dgs_scene_properties, 'rig_deform_mode', text='', icon_value=0, emboss=True)
+    col_384C8 = layout_function.column(heading='', align=True)
+    col_384C8.alert = alert
+    col_384C8.enabled = enabled
+    col_384C8.active = True
+    col_384C8.use_property_split = False
+    col_384C8.use_property_decorate = False
+    col_384C8.scale_x = 1.0
+    col_384C8.scale_y = 1.0
+    col_384C8.alignment = 'Expand'.upper()
+    col_384C8.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+    col_384C8.label(text='Scale Adjust Mode', icon_value=0)
+    col_384C8.prop(bpy.context.scene.sna_dgs_scene_properties, 'rig_scale_safety_mode', text='', icon_value=0, emboss=True)
+    col_96F9F = layout_function.column(heading='', align=True)
+    col_96F9F.alert = alert
+    col_96F9F.enabled = enabled
+    col_96F9F.active = True
+    col_96F9F.use_property_split = False
+    col_96F9F.use_property_decorate = False
+    col_96F9F.scale_x = 1.0
+    col_96F9F.scale_y = 1.0
+    col_96F9F.alignment = 'Expand'.upper()
+    col_96F9F.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+    col_96F9F.prop(bpy.context.scene.sna_dgs_scene_properties, 'rig_update_sh_attributes', text='Update Spherical Harmonics', icon_value=0, emboss=True)
+    if bpy.context.scene.sna_dgs_scene_properties.rig_update_sh_attributes:
+        col_FEC76 = col_96F9F.column(heading='', align=True)
+        col_FEC76.alert = alert
+        col_FEC76.enabled = enabled
+        col_FEC76.active = True
+        col_FEC76.use_property_split = False
+        col_FEC76.use_property_decorate = False
+        col_FEC76.scale_x = 1.0
+        col_FEC76.scale_y = 1.0
+        col_FEC76.alignment = 'Expand'.upper()
+        col_FEC76.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+        col_FEC76.label(text='SH Quality', icon_value=0)
+        row_83260 = col_FEC76.row(heading='', align=False)
+        row_83260.alert = False
+        row_83260.enabled = True
+        row_83260.active = True
+        row_83260.use_property_split = False
+        row_83260.use_property_decorate = False
+        row_83260.scale_x = 1.0
+        row_83260.scale_y = 1.0
+        row_83260.alignment = 'Expand'.upper()
+        row_83260.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+        row_83260.prop(bpy.context.scene.sna_dgs_scene_properties, 'rig_sh_quality_mode', text=bpy.context.scene.sna_dgs_scene_properties.rig_sh_quality_mode, icon_value=0, emboss=True, expand=True)
+
+
+def sna_rig_cache_frames_993DF(layout_function, enabled):
+    col_EF5B6 = layout_function.column(heading='', align=True)
+    col_EF5B6.alert = False
+    col_EF5B6.enabled = enabled
+    col_EF5B6.active = True
+    col_EF5B6.use_property_split = False
+    col_EF5B6.use_property_decorate = False
+    col_EF5B6.scale_x = 1.0
+    col_EF5B6.scale_y = 1.0
+    col_EF5B6.alignment = 'Expand'.upper()
+    col_EF5B6.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+    col_EF5B6.prop(bpy.context.scene.sna_dgs_scene_properties, 'rig_bake_start_frame', text='Start Frame', icon_value=0, emboss=True)
+    col_EF5B6.prop(bpy.context.scene.sna_dgs_scene_properties, 'rig_bake_end_frame', text='End Frame', icon_value=0, emboss=True)
+    col_EF5B6.prop(bpy.context.scene.sna_dgs_scene_properties, 'rig_bake_frame_step', text='Frame Step', icon_value=0, emboss=True)
+
+
 def sna_modify_menu_AEA26(layout_function, ):
+    box_A4C5D = layout_function.box()
+    box_A4C5D.alert = False
+    box_A4C5D.enabled = True
+    box_A4C5D.active = True
+    box_A4C5D.use_property_split = False
+    box_A4C5D.use_property_decorate = False
+    box_A4C5D.alignment = 'Expand'.upper()
+    box_A4C5D.scale_x = 1.0
+    box_A4C5D.scale_y = 1.0
+    if not True: box_A4C5D.operator_context = "EXEC_DEFAULT"
+    op = box_A4C5D.operator('sna.dgs_render_remove_higher_sh_attributes_cb703', text='Remove SH Attributes', icon_value=0, emboss=True, depress=False)
     box_0B550 = layout_function.box()
     box_0B550.alert = False
     box_0B550.enabled = True
@@ -9032,18 +17221,8 @@ def sna_modify_menu_AEA26(layout_function, ):
     box_0B550.scale_x = 1.0
     box_0B550.scale_y = 1.0
     if not True: box_0B550.operator_context = "EXEC_DEFAULT"
-    col_4F908 = box_0B550.column(heading='', align=True)
-    col_4F908.alert = False
-    col_4F908.enabled = True
-    col_4F908.active = True
-    col_4F908.use_property_split = False
-    col_4F908.use_property_decorate = False
-    col_4F908.scale_x = 1.0
-    col_4F908.scale_y = 1.0
-    col_4F908.alignment = 'Expand'.upper()
-    col_4F908.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
-    op = col_4F908.operator('sna.dgs_render_append_wire_sphere_2bf63', text='Add Wire Sphere', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'noun-sphere-7915480-FFFFFF.svg')), emboss=True, depress=False)
-    op = col_4F908.operator('sna.dgs_render_append_wire_cube_56e0f', text='Add Wire Cube', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'noun-cube-7915485-FFFFFF.svg')), emboss=True, depress=False)
+    layout_function = box_0B550
+    sna_append_wire_primitives_15D73(layout_function, )
     col_5374E = layout_function.column(heading='', align=False)
     col_5374E.alert = False
     col_5374E.enabled = True
@@ -9068,6 +17247,8 @@ def sna_modify_menu_AEA26(layout_function, ):
     sna_convert_to_rough_mesh_BF549(layout_function, )
     layout_function = col_5374E
     sna_adjust_attributes_AB643(layout_function, )
+    layout_function = col_5374E
+    sna_dgs_mods_uv_edit_7D8A8(layout_function, )
 
 
 class SNA_OT_Dgs_Render_Append_Wire_Sphere_2Bf63(bpy.types.Operator):
@@ -9083,8 +17264,10 @@ class SNA_OT_Dgs_Render_Append_Wire_Sphere_2Bf63(bpy.types.Operator):
         return not False
 
     def execute(self, context):
+        if 'EDIT_MESH'==bpy.context.mode:
+            bpy.ops.object.mode_set('INVOKE_DEFAULT', mode='OBJECT')
         before_data = list(bpy.data.objects)
-        bpy.ops.wm.append(directory=os.path.join(os.path.dirname(__file__), 'assets', '3DGS Render APPEND V4.blend') + r'\Object', filename='Wire Sphere', link=False)
+        bpy.ops.wm.append(directory=os.path.join(os.path.dirname(__file__), 'assets', '3DGS Render APPEND V5.blend') + r'\Object', filename='Wire Sphere', link=False)
         new_data = list(filter(lambda d: not d in before_data, list(bpy.data.objects)))
         appended_69F39 = None if not new_data else new_data[0]
         appended_69F39.location = bpy.context.scene.cursor.location
@@ -9107,8 +17290,10 @@ class SNA_OT_Dgs_Render_Append_Wire_Cube_56E0F(bpy.types.Operator):
         return not False
 
     def execute(self, context):
+        if 'EDIT_MESH'==bpy.context.mode:
+            bpy.ops.object.mode_set('INVOKE_DEFAULT', mode='OBJECT')
         before_data = list(bpy.data.objects)
-        bpy.ops.wm.append(directory=os.path.join(os.path.dirname(__file__), 'assets', '3DGS Render APPEND V4.blend') + r'\Object', filename='Wire Cube', link=False)
+        bpy.ops.wm.append(directory=os.path.join(os.path.dirname(__file__), 'assets', '3DGS Render APPEND V5.blend') + r'\Object', filename='Wire Cube', link=False)
         new_data = list(filter(lambda d: not d in before_data, list(bpy.data.objects)))
         appended_8B494 = None if not new_data else new_data[0]
         appended_8B494.location = bpy.context.scene.cursor.location
@@ -9375,7 +17560,7 @@ class SNA_OT_Dgs_Render_Remove_Higher_Sh_Attributes_Cb703(bpy.types.Operator):
         box_DCA59.scale_x = 1.0
         box_DCA59.scale_y = 1.0
         if not True: box_DCA59.operator_context = "EXEC_DEFAULT"
-        box_DCA59.label(text='This action is destructive and not reversible', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
+        box_DCA59.label(text='This action is destructive and not reversible', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
         box_DCA59.label(text='Removing higher SH attributes can save memory and increase performance in some areas.', icon_value=0)
         box_DCA59.label(text='If you are unsure about what to do, try working on a duplicate.', icon_value=0)
 
@@ -9383,118 +17568,19 @@ class SNA_OT_Dgs_Render_Remove_Higher_Sh_Attributes_Cb703(bpy.types.Operator):
         return context.window_manager.invoke_props_dialog(self, width=500)
 
 
-class SNA_OT_Dgs_Render_Remove_Adjust_Attributes_Modifier_Fbc71(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_remove_adjust_attributes_modifier_fbc71"
-    bl_label = "3DGS Render: Remove Adjust Attributes Modifier"
-    bl_description = "Removes the named modifier"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        bpy.context.view_layer.objects.active.modifiers.remove(modifier=bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Adjust_Attributes_GN'], )
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
-
-
-class SNA_OT_Dgs_Render_Apply_Adjust_Attributes_Modifier_Aefe7(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_apply_adjust_attributes_modifier_aefe7"
-    bl_label = "3DGS Render: Apply Adjust Attributes Modifier"
-    bl_description = "Applies the named modifier"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        object_name = bpy.context.view_layer.objects.active.name
-        modifier_name = 'KIRI_3DGS_Adjust_Attributes_GN'
-        obj = bpy.data.objects.get(object_name)
-        if obj:
-            modifier = obj.modifiers.get(modifier_name)
-            if modifier:
-                if not modifier.show_viewport:
-                    # Simply remove the modifier if it's hidden
-                    obj.modifiers.remove(modifier)
-                    print(f"Removed hidden modifier '{modifier_name}' from object '{object_name}'.")
-                else:
-                    # Apply normally if visible
-                    bpy.ops.object.modifier_apply(modifier=modifier_name)
-                    print(f"Applied visible modifier '{modifier_name}' to object '{object_name}'.")
-            else:
-                print(f"Modifier '{modifier_name}' not found on object '{object_name}'.")
-        else:
-            print(f"Object '{object_name}' not found.")
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
-
-
-class SNA_OT_Dgs_Render_Remove_Adjust_Attribute_Modifier_C5491(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_remove_adjust_attribute_modifier_c5491"
-    bl_label = "3DGS Render: Remove Adjust Attribute Modifier"
-    bl_description = "Removes the named modifier"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        bpy.context.view_layer.objects.active.modifiers.remove(modifier=bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Adjust_Attributes_GN'], )
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
-
-
-class SNA_OT_Dgs_Render_Apply_Adjust_Attribute_Modifier_B24A5(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_apply_adjust_attribute_modifier_b24a5"
-    bl_label = "3DGS Render: Apply Adjust Attribute Modifier"
-    bl_description = "Applies the named modifier"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        object_name = bpy.context.view_layer.objects.active.name
-        modifier_name = 'KIRI_3DGS_Adjust_Attributes_GN'
-        obj = bpy.data.objects.get(object_name)
-        if obj:
-            modifier = obj.modifiers.get(modifier_name)
-            if modifier:
-                if not modifier.show_viewport:
-                    # Simply remove the modifier if it's hidden
-                    obj.modifiers.remove(modifier)
-                    print(f"Removed hidden modifier '{modifier_name}' from object '{object_name}'.")
-                else:
-                    # Apply normally if visible
-                    bpy.ops.object.modifier_apply(modifier=modifier_name)
-                    print(f"Applied visible modifier '{modifier_name}' to object '{object_name}'.")
-            else:
-                print(f"Modifier '{modifier_name}' not found on object '{object_name}'.")
-        else:
-            print(f"Object '{object_name}' not found.")
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
+def sna_append_wire_primitives_15D73(layout_function, ):
+    col_4F908 = layout_function.column(heading='', align=True)
+    col_4F908.alert = False
+    col_4F908.enabled = True
+    col_4F908.active = True
+    col_4F908.use_property_split = False
+    col_4F908.use_property_decorate = False
+    col_4F908.scale_x = 1.0
+    col_4F908.scale_y = 1.0
+    col_4F908.alignment = 'Expand'.upper()
+    col_4F908.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
+    op = col_4F908.operator('sna.dgs_render_append_wire_sphere_2bf63', text='Add Wire Sphere', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'noun-sphere-7915480-FFFFFF.svg')), emboss=True, depress=False)
+    op = col_4F908.operator('sna.dgs_render_append_wire_cube_56e0f', text='Add Wire Cube', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'noun-cube-7915485-FFFFFF.svg')), emboss=True, depress=False)
 
 
 def sna_adjust_attributes_AB643(layout_function, ):
@@ -9521,7 +17607,7 @@ def sna_adjust_attributes_AB643(layout_function, ):
         box_6671A.scale_x = 1.0
         box_6671A.scale_y = 1.0
         if not True: box_6671A.operator_context = "EXEC_DEFAULT"
-        box_6671A.label(text='Accurate value changes may only ', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
+        box_6671A.label(text='Accurate value changes may only ', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
         box_6671A.label(text='be visible in Render mode and external', icon_value=0)
         box_6671A.label(text='3DGS viewers. This modifier will show in', icon_value=0)
         box_6671A.label(text='Render mode for the active object.', icon_value=0)
@@ -9585,8 +17671,12 @@ def sna_attribute_adjust_properties_2C323(layout_function, ):
     row_3EABC.alignment = 'Right'.upper()
     row_3EABC.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
     row_3EABC.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Adjust_Attributes_GN'], 'show_render', text='', icon_value=0, emboss=True, toggle=True)
-    op = row_3EABC.operator('sna.dgs_render_apply_adjust_attribute_modifier_b24a5', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'check.svg')), emboss=True, depress=False)
-    op = row_3EABC.operator('sna.dgs_render_remove_adjust_attribute_modifier_c5491', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'trash.svg')), emboss=True, depress=False)
+    op = row_3EABC.operator('sna.dgs_render_apply_modifier_0f5f2', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'check.svg')), emboss=True, depress=False)
+    op.sna_target_object = bpy.context.view_layer.objects.active.name
+    op.sna_target_modifier = 'KIRI_3DGS_Adjust_Attributes_GN'
+    op = row_3EABC.operator('sna.dgs_render_remove_modifier_9cf0d', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'trash.svg')), emboss=True, depress=False)
+    op.sna_target_object = bpy.context.view_layer.objects.active.name
+    op.sna_target_modifier = 'KIRI_3DGS_Adjust_Attributes_GN'
     box_F28C4 = box_C40B6.box()
     box_F28C4.alert = False
     box_F28C4.enabled = True
@@ -9634,7 +17724,7 @@ def sna_attribute_adjust_properties_2C323(layout_function, ):
             box_EE993.scale_x = 1.0
             box_EE993.scale_y = 1.0
             if not True: box_EE993.operator_context = "EXEC_DEFAULT"
-            box_EE993.label(text='Change values slowly to avoid crashes', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
+            box_EE993.label(text='Change values slowly to avoid crashes', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
         attr_120DC = '["' + str('Socket_8' + '"]') 
         col_31C13.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Adjust_Attributes_GN'], attr_120DC, text='', icon_value=0, emboss=True, toggle=True)
         if (bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Adjust_Attributes_GN']['Socket_8'] == 0):
@@ -9746,7 +17836,7 @@ def sna_attribute_adjust_properties_2C323(layout_function, ):
             box_E8A8F.scale_x = 1.0
             box_E8A8F.scale_y = 1.0
             if not True: box_E8A8F.operator_context = "EXEC_DEFAULT"
-            box_E8A8F.label(text='Change values slowly to avoid crashes', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
+            box_E8A8F.label(text='Change values slowly to avoid crashes', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
         attr_20728 = '["' + str('Socket_55' + '"]') 
         col_F6DA7.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Adjust_Attributes_GN'], attr_20728, text='All Scales', icon_value=0, emboss=True, toggle=True)
     col_CADFD = box_C40B6.column(heading='', align=True)
@@ -10085,32 +18175,12 @@ class SNA_OT_Dgs_Render_Remove_Higher_Sh_Attributes_86F09(bpy.types.Operator):
         box_8FEFB.scale_x = 1.0
         box_8FEFB.scale_y = 1.0
         if not True: box_8FEFB.operator_context = "EXEC_DEFAULT"
-        box_8FEFB.label(text='This action is destructive and not reversible', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
+        box_8FEFB.label(text='This action is destructive and not reversible', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
         box_8FEFB.label(text='Removing higher SH attributes (f_rest attributes) can save memory and increase performance in some areas.', icon_value=0)
         box_8FEFB.label(text='If you are unsure about what to do, try working on a duplicate.', icon_value=0)
 
     def invoke(self, context, event):
         return context.window_manager.invoke_props_dialog(self, width=500)
-
-
-class SNA_OT_Dgs_Render_Remove_Camera_Cull_Modifier_F15Ee(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_remove_camera_cull_modifier_f15ee"
-    bl_label = "3DGS Render: Remove Camera Cull Modifier"
-    bl_description = "Removes the named modifier"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        bpy.context.view_layer.objects.active.modifiers.remove(modifier=bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Camera_Cull_GN'], )
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
 
 
 class SNA_OT_Dgs_Render_Auto_Set_Up_Camera_Cull_Properties_Aef48(bpy.types.Operator):
@@ -10134,43 +18204,6 @@ class SNA_OT_Dgs_Render_Auto_Set_Up_Camera_Cull_Properties_Aef48(bpy.types.Opera
         if bpy.context and bpy.context.screen:
             for a in bpy.context.screen.areas:
                 a.tag_redraw()
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
-
-
-class SNA_OT_Dgs_Render_Apply_Camera_Cull_Modifier_7C6F7(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_apply_camera_cull_modifier_7c6f7"
-    bl_label = "3DGS Render: Apply Camera Cull Modifier"
-    bl_description = "Applies the named modifier"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        object_name = bpy.context.view_layer.objects.active.name
-        modifier_name = 'KIRI_3DGS_Camera_Cull_GN'
-        obj = bpy.data.objects.get(object_name)
-        if obj:
-            modifier = obj.modifiers.get(modifier_name)
-            if modifier:
-                if not modifier.show_viewport:
-                    # Simply remove the modifier if it's hidden
-                    obj.modifiers.remove(modifier)
-                    print(f"Removed hidden modifier '{modifier_name}' from object '{object_name}'.")
-                else:
-                    # Apply normally if visible
-                    bpy.ops.object.modifier_apply(modifier=modifier_name)
-                    print(f"Applied visible modifier '{modifier_name}' to object '{object_name}'.")
-            else:
-                print(f"Modifier '{modifier_name}' not found on object '{object_name}'.")
-        else:
-            print(f"Object '{object_name}' not found.")
         return {"FINISHED"}
 
     def invoke(self, context, event):
@@ -10211,8 +18244,12 @@ def sna_camera_cull_8069C(layout_function, ):
         row_F9B38.alignment = 'Right'.upper()
         row_F9B38.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
         row_F9B38.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Camera_Cull_GN'], 'show_render', text='', icon_value=0, emboss=True, toggle=True)
-        op = row_F9B38.operator('sna.dgs_render_apply_camera_cull_modifier_7c6f7', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'check.svg')), emboss=True, depress=False)
-        op = row_F9B38.operator('sna.dgs_render_remove_camera_cull_modifier_f15ee', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'trash.svg')), emboss=True, depress=False)
+        op = row_F9B38.operator('sna.dgs_render_apply_modifier_0f5f2', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'check.svg')), emboss=True, depress=False)
+        op.sna_target_object = bpy.context.view_layer.objects.active.name
+        op.sna_target_modifier = 'KIRI_3DGS_Camera_Cull_GN'
+        op = row_F9B38.operator('sna.dgs_render_remove_modifier_9cf0d', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'trash.svg')), emboss=True, depress=False)
+        op.sna_target_object = bpy.context.view_layer.objects.active.name
+        op.sna_target_modifier = 'KIRI_3DGS_Camera_Cull_GN'
         if (bpy.context.scene.camera == None):
             box_07B9F = box_7279D.box()
             box_07B9F.alert = False
@@ -10224,7 +18261,7 @@ def sna_camera_cull_8069C(layout_function, ):
             box_07B9F.scale_x = 1.0
             box_07B9F.scale_y = 1.0
             if not True: box_07B9F.operator_context = "EXEC_DEFAULT"
-            box_07B9F.label(text='No Active Camera In Scene', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
+            box_07B9F.label(text='No Active Camera In Scene', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
         else:
             col_A2A21 = box_7279D.column(heading='', align=True)
             col_A2A21.alert = False
@@ -10278,63 +18315,6 @@ def sna_camera_cull_8069C(layout_function, ):
         op.sna_modifier_name = 'KIRI_3DGS_Camera_Cull_GN'
 
 
-class SNA_OT_Dgs_Render_Remove_Colour_Edit_Modifier_6255F(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_remove_colour_edit_modifier_6255f"
-    bl_label = "3DGS Render: Remove Colour Edit Modifier"
-    bl_description = "Removes the named modifier"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        bpy.context.view_layer.objects.active.modifiers.remove(modifier=bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Colour_Edit_GN'], )
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
-
-
-class SNA_OT_Dgs_Render_Apply_Colour_Edit_Modifier_C83C4(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_apply_colour_edit_modifier_c83c4"
-    bl_label = "3DGS Render: Apply Colour Edit Modifier"
-    bl_description = "Applies the named modifier"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        object_name = bpy.context.view_layer.objects.active.name
-        modifier_name = 'KIRI_3DGS_Colour_Edit_GN'
-        obj = bpy.data.objects.get(object_name)
-        if obj:
-            modifier = obj.modifiers.get(modifier_name)
-            if modifier:
-                if not modifier.show_viewport:
-                    # Simply remove the modifier if it's hidden
-                    obj.modifiers.remove(modifier)
-                    print(f"Removed hidden modifier '{modifier_name}' from object '{object_name}'.")
-                else:
-                    # Apply normally if visible
-                    bpy.ops.object.modifier_apply(modifier=modifier_name)
-                    print(f"Applied visible modifier '{modifier_name}' to object '{object_name}'.")
-            else:
-                print(f"Modifier '{modifier_name}' not found on object '{object_name}'.")
-        else:
-            print(f"Object '{object_name}' not found.")
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
-
-
 def sna_colour_edit_37123(layout_function, ):
     if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Colour_Edit_GN' in bpy.context.view_layer.objects.active.modifiers):
         box_1A729 = layout_function.box()
@@ -10369,8 +18349,12 @@ def sna_colour_edit_37123(layout_function, ):
         row_7335E.alignment = 'Right'.upper()
         row_7335E.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
         row_7335E.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Colour_Edit_GN'], 'show_render', text='', icon_value=0, emboss=True, toggle=True)
-        op = row_7335E.operator('sna.dgs_render_apply_colour_edit_modifier_c83c4', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'check.svg')), emboss=True, depress=False)
-        op = row_7335E.operator('sna.dgs_render_remove_colour_edit_modifier_6255f', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'trash.svg')), emboss=True, depress=False)
+        op = row_7335E.operator('sna.dgs_render_apply_modifier_0f5f2', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'check.svg')), emboss=True, depress=False)
+        op.sna_target_object = bpy.context.view_layer.objects.active.name
+        op.sna_target_modifier = 'KIRI_3DGS_Colour_Edit_GN'
+        op = row_7335E.operator('sna.dgs_render_remove_modifier_9cf0d', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'trash.svg')), emboss=True, depress=False)
+        op.sna_target_object = bpy.context.view_layer.objects.active.name
+        op.sna_target_modifier = 'KIRI_3DGS_Colour_Edit_GN'
         col_836C0 = box_1A729.column(heading='', align=True)
         col_836C0.alert = False
         col_836C0.enabled = True
@@ -10459,71 +18443,6 @@ def sna_colour_edit_37123(layout_function, ):
         op.sna_modifier_name = 'KIRI_3DGS_Colour_Edit_GN'
 
 
-class SNA_OT_Dgs_Render_Remove_Convert_To_Rough_Mesh_Modifier_A8C4C(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_remove_convert_to_rough_mesh_modifier_a8c4c"
-    bl_label = "3DGS Render: Remove Convert To Rough Mesh Modifier"
-    bl_description = "Removes the named modifier"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        bpy.context.view_layer.objects.active.modifiers.remove(modifier=bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Convert_To_Rough_Mesh_GN'], )
-        bpy.context.view_layer.objects.active.update_tag(refresh={'OBJECT'}, )
-        if bpy.context and bpy.context.screen:
-            for a in bpy.context.screen.areas:
-                a.tag_redraw()
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
-
-
-class SNA_OT_Dgs_Render_Apply_Convert_To_Rough_Mesh_Modifier_9F4B2(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_apply_convert_to_rough_mesh_modifier_9f4b2"
-    bl_label = "3DGS Render: Apply Convert To Rough Mesh Modifier"
-    bl_description = "Applies the named modifier"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        object_name = bpy.context.view_layer.objects.active.name
-        modifier_name = 'KIRI_3DGS_Convert_To_Rough_Mesh_GN'
-        obj = bpy.data.objects.get(object_name)
-        if obj:
-            modifier = obj.modifiers.get(modifier_name)
-            if modifier:
-                if not modifier.show_viewport:
-                    # Simply remove the modifier if it's hidden
-                    obj.modifiers.remove(modifier)
-                    print(f"Removed hidden modifier '{modifier_name}' from object '{object_name}'.")
-                else:
-                    # Apply normally if visible
-                    bpy.ops.object.modifier_apply(modifier=modifier_name)
-                    print(f"Applied visible modifier '{modifier_name}' to object '{object_name}'.")
-            else:
-                print(f"Modifier '{modifier_name}' not found on object '{object_name}'.")
-        else:
-            print(f"Object '{object_name}' not found.")
-        bpy.context.view_layer.objects.active.update_tag(refresh={'OBJECT'}, )
-        if bpy.context and bpy.context.screen:
-            for a in bpy.context.screen.areas:
-                a.tag_redraw()
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
-
-
 def sna_convert_to_rough_mesh_BF549(layout_function, ):
     if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Convert_To_Rough_Mesh_GN' in bpy.context.view_layer.objects.active.modifiers):
         box_F10CF = layout_function.box()
@@ -10558,8 +18477,12 @@ def sna_convert_to_rough_mesh_BF549(layout_function, ):
         row_9D884.alignment = 'Right'.upper()
         row_9D884.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
         row_9D884.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Convert_To_Rough_Mesh_GN'], 'show_render', text='', icon_value=0, emboss=True, toggle=True)
-        op = row_9D884.operator('sna.dgs_render_apply_convert_to_rough_mesh_modifier_9f4b2', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'check.svg')), emboss=True, depress=False)
-        op = row_9D884.operator('sna.dgs_render_remove_convert_to_rough_mesh_modifier_a8c4c', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'trash.svg')), emboss=True, depress=False)
+        op = row_9D884.operator('sna.dgs_render_apply_modifier_0f5f2', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'check.svg')), emboss=True, depress=False)
+        op.sna_target_object = bpy.context.view_layer.objects.active.name
+        op.sna_target_modifier = 'KIRI_3DGS_Convert_To_Rough_Mesh_GN'
+        op = row_9D884.operator('sna.dgs_render_remove_modifier_9cf0d', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'trash.svg')), emboss=True, depress=False)
+        op.sna_target_object = bpy.context.view_layer.objects.active.name
+        op.sna_target_modifier = 'KIRI_3DGS_Convert_To_Rough_Mesh_GN'
         col_D3A3B = box_F10CF.column(heading='', align=False)
         col_D3A3B.alert = False
         col_D3A3B.enabled = True
@@ -10578,10 +18501,8 @@ def sna_convert_to_rough_mesh_BF549(layout_function, ):
         col_D3A3B.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Convert_To_Rough_Mesh_GN'], attr_47308, text='Simplify', icon_value=0, emboss=True, toggle=True)
         attr_F2260 = '["' + str('Socket_6' + '"]') 
         col_D3A3B.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Convert_To_Rough_Mesh_GN'], attr_F2260, text='Smoothing', icon_value=0, emboss=True, toggle=True)
-        if '3DGS_Mesh_Type' in bpy.context.view_layer.objects.active:
-            if (bpy.context.view_layer.objects.active['3DGS_Mesh_Type'] == 'vert'):
-                attr_C0C06 = '["' + str('Socket_9' + '"]') 
-                col_D3A3B.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Convert_To_Rough_Mesh_GN'], attr_C0C06, text='Point Volume Radius', icon_value=0, emboss=True, toggle=True)
+        attr_C0C06 = '["' + str('Socket_9' + '"]') 
+        col_D3A3B.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Convert_To_Rough_Mesh_GN'], attr_C0C06, text='Point Volume Radius', icon_value=0, emboss=True, toggle=True)
         attr_6E61B = '["' + str('Socket_11' + '"]') 
         col_D3A3B.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Convert_To_Rough_Mesh_GN'], attr_6E61B, text='Filter Islands', icon_value=0, emboss=True, toggle=False)
         if bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Convert_To_Rough_Mesh_GN']['Socket_11']:
@@ -10622,7 +18543,7 @@ def sna_convert_to_rough_mesh_BF549(layout_function, ):
         row_A4E6D.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
         row_A4E6D.label(text='Convert To Rough Mesh', icon_value=0)
         op = row_A4E6D.operator('sna.dgs_render_append_rough_mesh_modifier_65da3', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'plus-circle.svg')), emboss=True, depress=False)
-        op.sna_create_duplicate_and_remove_other_modifiers = False
+        op.sna_create_duplicate = True
 
 
 class SNA_OT_Dgs_Render_Append_Rough_Mesh_Modifier_65Da3(bpy.types.Operator):
@@ -10630,7 +18551,7 @@ class SNA_OT_Dgs_Render_Append_Rough_Mesh_Modifier_65Da3(bpy.types.Operator):
     bl_label = "3DGS Render: Append Rough Mesh Modifier"
     bl_description = "Adds a Rough Mesh modifier to the active object."
     bl_options = {"REGISTER", "UNDO"}
-    sna_create_duplicate_and_remove_other_modifiers: bpy.props.BoolProperty(name='Create duplicate and remove other modifiers', description='', options={'HIDDEN'}, default=True)
+    sna_create_duplicate: bpy.props.BoolProperty(name='Create Duplicate', description='', options={'HIDDEN'}, default=False)
 
     @classmethod
     def poll(cls, context):
@@ -10640,81 +18561,117 @@ class SNA_OT_Dgs_Render_Append_Rough_Mesh_Modifier_65Da3(bpy.types.Operator):
 
     def execute(self, context):
         if (bpy.context.view_layer.objects.active.type == 'MESH' or bpy.context.view_layer.objects.active.type == 'CURVE'):
-            if self.sna_create_duplicate_and_remove_other_modifiers:
-                source_obj_name = bpy.context.view_layer.objects.active.name
-                # Input variables
-                #source_obj_name = "Cube"  # Change this to your object's name
-                offset_x = 0.0  # Input float variable for X offset
-                # Get the source object
-                source_obj = bpy.data.objects.get(source_obj_name)
-                # Check if the object exists
-                if source_obj:
-                    # Create a copy of the object
-                    new_obj = source_obj.copy()
-                    new_obj.data = source_obj.data.copy()
-                    # Link the new object to the scene
-                    bpy.context.scene.collection.objects.link(new_obj)
-                    # Apply the offset if any
-                    new_obj.location.x += offset_x
-                    # Clear current selection
-                    bpy.ops.object.select_all(action='DESELECT')
-                    # Select and activate the new object
-                    new_obj.select_set(True)
-                    bpy.context.view_layer.objects.active = new_obj
-                    # Store the new object's name in a variable
-                    new_object_name = new_obj.name
-                    # Output the new object for Serpens (return the actual object)
-                    output_object = new_obj
-                else:
-                    new_object_name = "ERROR: Source object not found"
-                    output_object = None
-                # Output the new object's name (this will be captured by Serpens)
-                print(new_object_name)
-                if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Render_GN' in bpy.context.view_layer.objects.active.modifiers):
-                    bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN']['Socket_50'] = 1
-                    bpy.context.view_layer.objects.active.update_tag(refresh={'DATA'}, )
+            if self.sna_create_duplicate:
+                new_object_name_0_e557e = sna_duplicate_object_ED1F0(bpy.context.view_layer.objects.active.name)
+                if (property_exists("bpy.data.objects[new_object_name_0_e557e].modifiers", globals(), locals()) and 'KIRI_3DGS_Render_GN' in bpy.data.objects[new_object_name_0_e557e].modifiers):
+                    bpy.data.objects[new_object_name_0_e557e].modifiers['KIRI_3DGS_Render_GN']['Socket_50'] = 1
+                    bpy.data.objects[new_object_name_0_e557e].update_tag(refresh={'DATA'}, )
                     if bpy.context and bpy.context.screen:
                         for a in bpy.context.screen.areas:
                             a.tag_redraw()
-                    object_name = bpy.context.view_layer.objects.active.name
-                    # Replace this with your object's name
-                    #object_name = "YourObjectName"
-                    # Get the object
+                    object_name = new_object_name_0_e557e
+                    # Replace this with your Serpens input or variable
+                    # object_name = "Cube"
                     obj = bpy.data.objects.get(object_name)
                     if obj:
-                        # Make sure the object is selected and active
-                        bpy.context.view_layer.objects.active = obj
-                        obj.select_set(True)
-                        # Apply all modifiers
-                        for modifier in obj.modifiers[:]:  # [:] creates a copy of the list to avoid modification issues
-                            try:
-                                bpy.ops.object.modifier_apply(modifier=modifier.name)
-                                print(f"Applied modifier: {modifier.name}")
-                            except Exception as e:
-                                print(f"Failed to apply modifier {modifier.name}: {str(e)}")
+                        # 1. Store the NAMES as plain strings, not the RNA structs
+                        modifier_names = [m.name for m in obj.modifiers] 
+                        for mod_name in modifier_names: 
+                            # 2. Fetch a fresh, live reference to the modifier on each iteration
+                            modifier = obj.modifiers.get(mod_name)
+                            # Failsafe in case a modifier was destroyed by a previous operation
+                            if not modifier:
+                                continue 
+                            if not modifier.show_viewport:
+                                # Safely remove hidden modifiers via data operation
+                                obj.modifiers.remove(modifier)
+                                print(f"Removed hidden modifier: {mod_name}")
+                            else:
+                                # Apply visible modifiers using an isolated context override
+                                try:
+                                    with bpy.context.temp_override(object=obj, active_object=obj):
+                                        bpy.ops.object.modifier_apply(modifier=mod_name)
+                                    print(f"Applied visible modifier: {mod_name}")
+                                except Exception as e:
+                                    print(f"Failed to apply modifier '{mod_name}'. Error: {e}")
                     else:
-                        print(f"Object '{object_name}' not found")
+                        print(f"Object '{object_name}' not found.")
+                    created_modifier_0_827c5 = sna_append_and_add_geo_nodes_function_execute_6BCD7('KIRI_3DGS_Convert_To_Rough_Mesh_GN', 'KIRI_3DGS_Convert_To_Rough_Mesh_GN', bpy.data.objects[new_object_name_0_e557e])
+                    if '3DGS_Mesh_Type' in bpy.data.objects[new_object_name_0_e557e]:
+                        object_name = new_object_name_0_e557e
+                        property_name = '3DGS_Mesh_Type'
+                        # Replace these with your object and property names
+                        #object_name = "Cube"
+                        #property_name = "my_custom_prop"
+                        # Get the object
+                        obj = bpy.data.objects.get(object_name)
+                        if obj is None:
+                            print(f"Error: Object '{object_name}' not found in the scene")
+                        else:
+                            if property_name in obj:
+                                del obj[property_name]
+                                print(f"Removed property '{property_name}' from object '{object_name}'")
+                            else:
+                                print(f"Property '{property_name}' not found on object '{object_name}'")
+                    if 'gaussian_source_uuid' in bpy.data.objects[new_object_name_0_e557e]:
+                        object_name = new_object_name_0_e557e
+                        property_name = 'gaussian_source_uuid'
+                        # Replace these with your object and property names
+                        #object_name = "Cube"
+                        #property_name = "my_custom_prop"
+                        # Get the object
+                        obj = bpy.data.objects.get(object_name)
+                        if obj is None:
+                            print(f"Error: Object '{object_name}' not found in the scene")
+                        else:
+                            if property_name in obj:
+                                del obj[property_name]
+                                print(f"Removed property '{property_name}' from object '{object_name}'")
+                            else:
+                                print(f"Property '{property_name}' not found on object '{object_name}'")
+                    if 'proxy_binding_proxy_uuid' in bpy.data.objects[new_object_name_0_e557e]:
+                        object_name = new_object_name_0_e557e
+                        property_name = 'proxy_binding_proxy_uuid'
+                        # Replace these with your object and property names
+                        #object_name = "Cube"
+                        #property_name = "my_custom_prop"
+                        # Get the object
+                        obj = bpy.data.objects.get(object_name)
+                        if obj is None:
+                            print(f"Error: Object '{object_name}' not found in the scene")
+                        else:
+                            if property_name in obj:
+                                del obj[property_name]
+                                print(f"Removed property '{property_name}' from object '{object_name}'")
+                            else:
+                                print(f"Property '{property_name}' not found on object '{object_name}'")
+                    bpy.data.objects[new_object_name_0_e557e].update_tag(refresh={'DATA'}, )
+                    if bpy.context and bpy.context.screen:
+                        for a in bpy.context.screen.areas:
+                            a.tag_redraw()
             else:
                 if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Render_GN' in bpy.context.view_layer.objects.active.modifiers):
                     bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Render_GN']['Socket_50'] = 1
-                    bpy.context.view_layer.objects.active.update_tag(refresh={'DATA'}, )
-                    if bpy.context and bpy.context.screen:
-                        for a in bpy.context.screen.areas:
-                            a.tag_redraw()
-            created_modifier_0_827c5 = sna_append_and_add_geo_nodes_function_execute_6BCD7('KIRI_3DGS_Convert_To_Rough_Mesh_GN', 'KIRI_3DGS_Convert_To_Rough_Mesh_GN', bpy.context.view_layer.objects.active)
-            for i_1EB8C in range(len(bpy.context.view_layer.objects.active.modifiers)):
-                if (bpy.context.view_layer.objects.active.modifiers[i_1EB8C] == created_modifier_0_827c5):
-                    bpy.context.view_layer.objects.active.modifiers.move(from_index=i_1EB8C, to_index=0, )
-                    bpy.context.view_layer.objects.active.update_tag(refresh={'DATA'}, )
-                    if bpy.context and bpy.context.screen:
-                        for a in bpy.context.screen.areas:
-                            a.tag_redraw()
+                    bpy.context.view_layer.objects.active.sna_dgs_object_properties.update_mode = 'Disable Camera Updates'
+                created_modifier_0_174bb = sna_append_and_add_geo_nodes_function_execute_6BCD7('KIRI_3DGS_Convert_To_Rough_Mesh_GN', 'KIRI_3DGS_Convert_To_Rough_Mesh_GN', bpy.context.view_layer.objects.active)
+                sna_move_modifier_index_23126(bpy.context.view_layer.objects.active, 'KIRI_3DGS_Convert_To_Rough_Mesh_GN', 0)
         else:
             self.report({'INFO'}, message='The Active Object is not a mesh or curve object.')
         return {"FINISHED"}
 
     def draw(self, context):
         layout = self.layout
+        box_48B99 = layout.box()
+        box_48B99.alert = False
+        box_48B99.enabled = True
+        box_48B99.active = True
+        box_48B99.use_property_split = False
+        box_48B99.use_property_decorate = False
+        box_48B99.alignment = 'Expand'.upper()
+        box_48B99.scale_x = 1.0
+        box_48B99.scale_y = 1.0
+        if not True: box_48B99.operator_context = "EXEC_DEFAULT"
+        box_48B99.label(text='Objects imported as Verts will produce smoother meshes', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
         box_F6B46 = layout.box()
         box_F6B46.alert = False
         box_F6B46.enabled = True
@@ -10725,68 +18682,14 @@ class SNA_OT_Dgs_Render_Append_Rough_Mesh_Modifier_65Da3(bpy.types.Operator):
         box_F6B46.scale_x = 1.0
         box_F6B46.scale_y = 1.0
         if not True: box_F6B46.operator_context = "EXEC_DEFAULT"
-        box_F6B46.prop(self, 'sna_create_duplicate_and_remove_other_modifiers', text='Create duplicate and remove other modifiers', icon_value=0, emboss=True)
-        box_F6B46.label(text='The 3DGS Render modifier will have Camera Updates disabled', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'tips-one.svg')))
+        box_F6B46.prop(self, 'sna_create_duplicate', text='Create a duplicate object', icon_value=0, emboss=True)
+        if self.sna_create_duplicate:
+            pass
+        else:
+            box_F6B46.label(text='The 3DGS Render modifier will have Camera Updates disabled', icon_value=0)
 
     def invoke(self, context, event):
         return context.window_manager.invoke_props_dialog(self, width=400)
-
-
-class SNA_OT_Dgs_Render_Remove_Crop_Box_Modifier_64Ea6(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_remove_crop_box_modifier_64ea6"
-    bl_label = "3DGS Render: Remove Crop Box Modifier"
-    bl_description = "Removes the named modifier"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        bpy.context.view_layer.objects.active.modifiers.remove(modifier=bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Crop_Box_GN'], )
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
-
-
-class SNA_OT_Dgs_Render_Apply_Crop_Box_Modifier_Bfdca(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_apply_crop_box_modifier_bfdca"
-    bl_label = "3DGS Render: Apply Crop Box Modifier"
-    bl_description = "Applies the named modifier"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        object_name = bpy.context.view_layer.objects.active.name
-        modifier_name = 'KIRI_3DGS_Crop_Box_GN'
-        obj = bpy.data.objects.get(object_name)
-        if obj:
-            modifier = obj.modifiers.get(modifier_name)
-            if modifier:
-                if not modifier.show_viewport:
-                    # Simply remove the modifier if it's hidden
-                    obj.modifiers.remove(modifier)
-                    print(f"Removed hidden modifier '{modifier_name}' from object '{object_name}'.")
-                else:
-                    # Apply normally if visible
-                    bpy.ops.object.modifier_apply(modifier=modifier_name)
-                    print(f"Applied visible modifier '{modifier_name}' to object '{object_name}'.")
-            else:
-                print(f"Modifier '{modifier_name}' not found on object '{object_name}'.")
-        else:
-            print(f"Object '{object_name}' not found.")
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
 
 
 def sna_crop_box_F2C60(layout_function, ):
@@ -10823,8 +18726,12 @@ def sna_crop_box_F2C60(layout_function, ):
         row_D8B0A.alignment = 'Right'.upper()
         row_D8B0A.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
         row_D8B0A.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Crop_Box_GN'], 'show_render', text='', icon_value=0, emboss=True, toggle=True)
-        op = row_D8B0A.operator('sna.dgs_render_apply_crop_box_modifier_bfdca', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'check.svg')), emboss=True, depress=False)
-        op = row_D8B0A.operator('sna.dgs_render_remove_crop_box_modifier_64ea6', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'trash.svg')), emboss=True, depress=False)
+        op = row_D8B0A.operator('sna.dgs_render_apply_modifier_0f5f2', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'check.svg')), emboss=True, depress=False)
+        op.sna_target_object = bpy.context.view_layer.objects.active.name
+        op.sna_target_modifier = 'KIRI_3DGS_Crop_Box_GN'
+        op = row_D8B0A.operator('sna.dgs_render_remove_modifier_9cf0d', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'trash.svg')), emboss=True, depress=False)
+        op.sna_target_object = bpy.context.view_layer.objects.active.name
+        op.sna_target_modifier = 'KIRI_3DGS_Crop_Box_GN'
         box_D7E3D = box_F47C3.box()
         box_D7E3D.alert = False
         box_D7E3D.enabled = True
@@ -10890,63 +18797,6 @@ def sna_crop_box_F2C60(layout_function, ):
         op.sna_modifier_name = 'KIRI_3DGS_Crop_Box_GN'
 
 
-class SNA_OT_Dgs_Render_Remove_Decimate_Modifier_Fff1B(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_remove_decimate_modifier_fff1b"
-    bl_label = "3DGS Render: Remove Decimate Modifier"
-    bl_description = "Removes the named modifier"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        bpy.context.view_layer.objects.active.modifiers.remove(modifier=bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Decimate_GN'], )
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
-
-
-class SNA_OT_Dgs_Render_Apply_Decimate_Modifier_7A32C(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_apply_decimate_modifier_7a32c"
-    bl_label = "3DGS Render: Apply Decimate Modifier"
-    bl_description = "Applies the named modifier"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        object_name = bpy.context.view_layer.objects.active.name
-        modifier_name = 'KIRI_3DGS_Decimate_GN'
-        obj = bpy.data.objects.get(object_name)
-        if obj:
-            modifier = obj.modifiers.get(modifier_name)
-            if modifier:
-                if not modifier.show_viewport:
-                    # Simply remove the modifier if it's hidden
-                    obj.modifiers.remove(modifier)
-                    print(f"Removed hidden modifier '{modifier_name}' from object '{object_name}'.")
-                else:
-                    # Apply normally if visible
-                    bpy.ops.object.modifier_apply(modifier=modifier_name)
-                    print(f"Applied visible modifier '{modifier_name}' to object '{object_name}'.")
-            else:
-                print(f"Modifier '{modifier_name}' not found on object '{object_name}'.")
-        else:
-            print(f"Object '{object_name}' not found.")
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
-
-
 def sna_decimate_D742E(layout_function, ):
     if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Decimate_GN' in bpy.context.view_layer.objects.active.modifiers):
         box_D6E89 = layout_function.box()
@@ -10981,8 +18831,12 @@ def sna_decimate_D742E(layout_function, ):
         row_3CA54.alignment = 'Right'.upper()
         row_3CA54.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
         row_3CA54.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Decimate_GN'], 'show_render', text='', icon_value=0, emboss=True, toggle=True)
-        op = row_3CA54.operator('sna.dgs_render_apply_decimate_modifier_7a32c', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'check.svg')), emboss=True, depress=False)
-        op = row_3CA54.operator('sna.dgs_render_remove_decimate_modifier_fff1b', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'trash.svg')), emboss=True, depress=False)
+        op = row_3CA54.operator('sna.dgs_render_apply_modifier_0f5f2', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'check.svg')), emboss=True, depress=False)
+        op.sna_target_object = bpy.context.view_layer.objects.active.name
+        op.sna_target_modifier = 'KIRI_3DGS_Decimate_GN'
+        op = row_3CA54.operator('sna.dgs_render_remove_modifier_9cf0d', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'trash.svg')), emboss=True, depress=False)
+        op.sna_target_object = bpy.context.view_layer.objects.active.name
+        op.sna_target_modifier = 'KIRI_3DGS_Decimate_GN'
         col_49D7B = box_D6E89.column(heading='', align=True)
         col_49D7B.alert = False
         col_49D7B.enabled = True
@@ -11054,63 +18908,6 @@ def sna_decimate_D742E(layout_function, ):
         op.sna_modifier_name = 'KIRI_3DGS_Decimate_GN'
 
 
-class SNA_OT_Dgs_Render_Remove_Remove_By_Size_Modifier_3A0E5(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_remove_remove_by_size_modifier_3a0e5"
-    bl_label = "3DGS Render: Remove Remove By Size Modifier"
-    bl_description = "Removes the named modifier"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        bpy.context.view_layer.objects.active.modifiers.remove(modifier=bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Remove_By Size_GN'], )
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
-
-
-class SNA_OT_Dgs_Render_Apply_Remove_By_Size_Modifier_6Dbab(bpy.types.Operator):
-    bl_idname = "sna.dgs_render_apply_remove_by_size_modifier_6dbab"
-    bl_label = "3DGS Render: Apply Remove By Size Modifier"
-    bl_description = "Applies the named modifier"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.version >= (3, 0, 0) and True:
-            cls.poll_message_set('')
-        return not False
-
-    def execute(self, context):
-        object_name = bpy.context.view_layer.objects.active.name
-        modifier_name = 'KIRI_3DGS_Remove_By Size_GN'
-        obj = bpy.data.objects.get(object_name)
-        if obj:
-            modifier = obj.modifiers.get(modifier_name)
-            if modifier:
-                if not modifier.show_viewport:
-                    # Simply remove the modifier if it's hidden
-                    obj.modifiers.remove(modifier)
-                    print(f"Removed hidden modifier '{modifier_name}' from object '{object_name}'.")
-                else:
-                    # Apply normally if visible
-                    bpy.ops.object.modifier_apply(modifier=modifier_name)
-                    print(f"Applied visible modifier '{modifier_name}' to object '{object_name}'.")
-            else:
-                print(f"Modifier '{modifier_name}' not found on object '{object_name}'.")
-        else:
-            print(f"Object '{object_name}' not found.")
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return self.execute(context)
-
-
 def sna_remove_by_size_E1DB7(layout_function, ):
     if (property_exists("bpy.context.view_layer.objects.active.modifiers", globals(), locals()) and 'KIRI_3DGS_Remove_By Size_GN' in bpy.context.view_layer.objects.active.modifiers):
         box_3DF8E = layout_function.box()
@@ -11145,8 +18942,12 @@ def sna_remove_by_size_E1DB7(layout_function, ):
         row_44648.alignment = 'Right'.upper()
         row_44648.operator_context = "INVOKE_DEFAULT" if True else "EXEC_DEFAULT"
         row_44648.prop(bpy.context.view_layer.objects.active.modifiers['KIRI_3DGS_Remove_By Size_GN'], 'show_render', text='', icon_value=0, emboss=True, toggle=True)
-        op = row_44648.operator('sna.dgs_render_apply_remove_by_size_modifier_6dbab', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'check.svg')), emboss=True, depress=False)
-        op = row_44648.operator('sna.dgs_render_remove_remove_by_size_modifier_3a0e5', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'trash.svg')), emboss=True, depress=False)
+        op = row_44648.operator('sna.dgs_render_apply_modifier_0f5f2', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'check.svg')), emboss=True, depress=False)
+        op.sna_target_object = bpy.context.view_layer.objects.active.name
+        op.sna_target_modifier = 'KIRI_3DGS_Remove_By Size_GN'
+        op = row_44648.operator('sna.dgs_render_remove_modifier_9cf0d', text='', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'trash.svg')), emboss=True, depress=False)
+        op.sna_target_object = bpy.context.view_layer.objects.active.name
+        op.sna_target_modifier = 'KIRI_3DGS_Remove_By Size_GN'
         col_51C8C = box_3DF8E.column(heading='', align=True)
         col_51C8C.alert = False
         col_51C8C.enabled = True
@@ -11219,15 +19020,14 @@ def sna_remove_by_size_E1DB7(layout_function, ):
 
 
 class SNA_GROUP_sna_dgs_scene_properties_group(bpy.types.PropertyGroup):
-    active_mode: bpy.props.EnumProperty(name='Active_Mode', description='', items=[('Edit', 'Edit', '', 0, 0), ('Render', 'Render', '', 0, 1), ('Mesh 2 3DGS', 'Mesh 2 3DGS', '', 0, 2)], update=sna_update_active_mode_4A881)
-    edit_mode_menu: bpy.props.EnumProperty(name='Edit_Mode_Menu', description='', items=[('Import', 'Import', '', 0, 0), ('Modifiers', 'Modifiers', '', 0, 1), ('Colour', 'Colour', '', 0, 2), ('Animate', 'Animate', '', 0, 3), ('HQ / LQ', 'HQ / LQ', '', 0, 4), ('Export', 'Export', '', 0, 5)])
+    active_mode: bpy.props.EnumProperty(name='Active_Mode', description='', items=[('Edit', 'Edit', '', 0, 0), ('Render', 'Render', '', 0, 1), ('Mesh 2 3DGS', 'Mesh 2 3DGS', '', 0, 2)], update=sna_update_active_mode_86E6B)
+    edit_mode_menu: bpy.props.EnumProperty(name='Edit_Mode_Menu', description='', items=[('Import', 'Import', '', 0, 0), ('Modifiers', 'Modifiers', '', 0, 1), ('Colour', 'Colour', '', 0, 2), ('Animate', 'Animate', '', 0, 3), ('HQ / LQ', 'HQ / LQ', '', 0, 4), ('Rig', 'Rig', '', 0, 5), ('Light Bake', 'Light Bake', '', 0, 6), ('Export', 'Export', '', 0, 7)])
     shading_menu: bpy.props.EnumProperty(name='Shading_Menu', description='', items=[('Selective 1', 'Selective 1', '', 0, 0), ('Selective 2', 'Selective 2', '', 0, 1), ('Selective 3', 'Selective 3', '', 0, 2), ('Vertex Paint', 'Vertex Paint', '', 0, 3), ('Image Overlay', 'Image Overlay', '', 0, 4)])
     hq_overlap: bpy.props.BoolProperty(name='HQ_Overlap', description='', default=False, update=sna_update_hq_overlap_DDF15)
     import_face_vert: bpy.props.EnumProperty(name='Import_Face_Vert', description='', items=[('Verts', 'Verts', '', 0, 0), ('Faces', 'Faces', '', 0, 1)])
     import_uv: bpy.props.BoolProperty(name='Import_UV', description='', default=False)
     import_proxy: bpy.props.BoolProperty(name='Import_Proxy', description='', default=False)
     mesh2gs_validate: bpy.props.BoolProperty(name='MESH2GS_Validate', description='', default=False)
-    show_tips: bpy.props.BoolProperty(name='Show_Tips', description='', default=False)
     r2_selected: bpy.props.BoolProperty(name='R2_Selected', description='', default=False)
     r2_transforms: bpy.props.BoolProperty(name='R2_Transforms', description='', default=True)
     r2_animation: bpy.props.BoolProperty(name='R2_Animation', description='', default=False)
@@ -11236,20 +19036,142 @@ class SNA_GROUP_sna_dgs_scene_properties_group(bpy.types.PropertyGroup):
     r2_comp: bpy.props.BoolProperty(name='R2_Comp', description='', default=False)
     r2_main_mode: bpy.props.EnumProperty(name='R2_Main_Mode', description='', items=[('Update', 'Update', '', 0, 0), ('Render', 'Render', '', 0, 1), ('Create', 'Create', '', 0, 2), ('Clean Up', 'Clean Up', '', 0, 3)])
     r2_clear_empties: bpy.props.BoolProperty(name='R2_Clear_Empties', description='', default=False)
-    r2_update_type: bpy.props.EnumProperty(name='R2_Update_Type', description='', items=[('Single Time', 'Single Time', '', 0, 0), ('Interval Update', 'Interval Update', '', 0, 1)])
+    r2_update_type: bpy.props.EnumProperty(name='R2_Update_Type', description='', items=[('Single', 'Single', '', 0, 0), ('Interval', 'Interval', '', 0, 1)])
     r2_interval_stop: bpy.props.BoolProperty(name='R2_Interval_Stop', description='', default=False)
     r2_interval: bpy.props.FloatProperty(name='R2_Interval', description='', default=0.10000000149011612, subtype='NONE', unit='NONE', min=0.0, max=1.0, step=3, precision=2)
     r2_hide_on_change: bpy.props.BoolProperty(name='R2_Hide_On_Change', description='', default=True)
-    r2_temp_path: bpy.props.StringProperty(name='R2_Temp_Path', description='', default='', subtype='NONE', maxlen=0)
+    r2_delete_temp_files: bpy.props.BoolProperty(name='R2_Delete_Temp_Files', description='', default=False)
+    export_single_or_sequence: bpy.props.EnumProperty(name='Export_Single_Or_Sequence', description='', items=[('3DGS', '3DGS', '', 0, 0), ('4DGS', '4DGS', '', 0, 1)])
+    export_suffix: bpy.props.StringProperty(name='Export_Suffix', description='', default='_export', subtype='NONE', maxlen=0)
+    export_output_path: bpy.props.StringProperty(name='Export_Output_Path', description='', default='', subtype='DIR_PATH', maxlen=0)
+    rig_temp_directory: bpy.props.StringProperty(name='RIG_Temp_Directory', description='', default='', subtype='DIR_PATH', maxlen=0)
+    rig_update_mode: bpy.props.EnumProperty(name='RIG_Update_Mode', description='', items=[('Single', 'Single', '', 0, 0), ('Interval', 'Interval', '', 0, 1)])
+    rig_deform_mode: bpy.props.EnumProperty(name='RIG_Deform_Mode', description='', items=[('Elastic', 'Elastic', '', 0, 0), ('Stable', 'Stable', '', 0, 1), ('Adaptive', 'Adaptive', '', 0, 2)])
+    rig_scale_safety_mode: bpy.props.EnumProperty(name='RIG_Scale_Safety_Mode', description='', items=[('Local Clamp', 'Local Clamp', '', 0, 0), ('Global Clamp', 'Global Clamp', '', 0, 1), ('Off', 'Off', '', 0, 2)])
+    rig_bake_start_frame: bpy.props.IntProperty(name='RIG_Bake_Start_Frame', description='', default=1, subtype='NONE', soft_min=0)
+    rig_bake_end_frame: bpy.props.IntProperty(name='RIG_Bake_End_Frame', description='', default=10, subtype='NONE', soft_min=0)
+    rig_update_interval: bpy.props.FloatProperty(name='RIG_Update_Interval', description='', default=0.5, subtype='TIME', unit='TIME', min=0.0, step=3, precision=2)
+    rig_interval_stop: bpy.props.BoolProperty(name='RIG_Interval_Stop', description='', default=True)
+    rig_bake_frame_step: bpy.props.IntProperty(name='RIG_Bake_Frame_Step', description='', default=1, subtype='NONE', min=1)
+    rig_bind_method: bpy.props.EnumProperty(name='RIG_Bind_Method', description='', items=[('Volumetric', 'Volumetric', '', 0, 0), ('Surface', 'Surface', '', 0, 1), ('Hybrid', 'Hybrid', '', 0, 2)])
+    rig_target_mode: bpy.props.EnumProperty(name='RIG_Target_Mode', description='', items=[('Active', 'Active', '', 0, 0), ('Input Object', 'Input Object', '', 0, 1), ('All Bound', 'All Bound', '', 0, 2)])
+    rig_target_obj: bpy.props.PointerProperty(name='RIG_Target_Obj', description='', type=bpy.types.Object)
+    rig_surface_dist_factor: bpy.props.FloatProperty(name='RIG_Surface_Dist_Factor', description='', default=1.5, subtype='NONE', unit='NONE', min=0.10000000149011612, step=3, precision=2)
+    rig_update_sh_attributes: bpy.props.BoolProperty(name='RIG_update_sh_attributes', description='', default=True)
+    rig_sh_quality_mode: bpy.props.EnumProperty(name='RIG_sh_quality_mode', description='', items=[('Fast', 'Fast', '', 0, 0), ('Balanced', 'Balanced', '', 0, 1), ('Final', 'Final', '', 0, 2)])
+    rig_bind_samples: bpy.props.IntProperty(name='RIG_Bind Samples', description='', default=32, subtype='NONE', soft_min=8)
+    r2_render_rig_cache_mode: bpy.props.EnumProperty(name='R2_Render_Rig_Cache_Mode', description='', items=[('None', 'None', '', 0, 0), ('Enabled Baked', 'Enabled Baked', '', 0, 1)])
+    r2_sh_degree: bpy.props.IntProperty(name='R2_SH_Degree', description='', default=3, subtype='NONE', min=0, max=3)
+    r2_sort_threshold: bpy.props.FloatProperty(name='R2_Sort_Threshold', description='', default=0.05000000074505806, subtype='NONE', unit='NONE', min=0.0, max=1.0, step=3, precision=2)
+    select_select_by_obj: bpy.props.PointerProperty(name='Select_select_by_obj', description='', type=bpy.types.Object)
+    select_obj_select_mode: bpy.props.EnumProperty(name='Select_obj_select_mode', description='', items=[('INSIDE', 'INSIDE', '', 0, 0), ('OUTSIDE', 'OUTSIDE', '', 0, 1)])
+    select_attribute_type: bpy.props.EnumProperty(name='Select_attribute_type', description='', items=[('SCALE', 'SCALE', '', 0, 0), ('STRETCH', 'STRETCH', '', 0, 1), ('ROT', 'ROT', '', 0, 2)])
+    select_attribute_scale_factor: bpy.props.FloatProperty(name='Select_attribute_scale_factor', description='', default=0.0, subtype='NONE', unit='NONE', min=0.0, max=1.0, step=3, precision=2)
+    select_attribute_scale_select_type: bpy.props.EnumProperty(name='Select_attribute_scale_select_type', description='', items=[('GREATER', 'GREATER', '', 0, 0), ('LESS', 'LESS', '', 0, 1), ('Equal to', 'Equal to', '', 0, 2)])
+    select_color_attribute: bpy.props.FloatVectorProperty(name='Select_color_attribute', description='', size=3, default=(10000.0, 10000.0, 10000.0), subtype='COLOR_GAMMA', unit='NONE', step=3, precision=6)
+    select_attribute_color_select_type: bpy.props.EnumProperty(name='Select_attribute_color_select_type', description='', items=[('Equal to', 'Equal to', '', 0, 0), ('Brighter than', 'Brighter than', '', 0, 1), ('Darker than', 'Darker than', '', 0, 2)])
+    relight_lighting_factor_mode: bpy.props.EnumProperty(name='RELIGHT_lighting_factor_mode', description='', items=[('Tinted Luminance', 'Tinted Luminance', '', 0, 0), ('Luminance', 'Luminance', '', 0, 1), ('RGB', 'RGB', '', 0, 2)])
+    relight_factor_curve_mode: bpy.props.EnumProperty(name='RELIGHT_factor_curve_mode', description='', items=[('Reinhard', 'Reinhard', '', 0, 0), ('Linear', 'Linear', '', 0, 1)])
+    relight_colorize_mix: bpy.props.FloatProperty(name='RELIGHT_colorize_mix', description='', default=1.0, subtype='NONE', unit='NONE', min=0.0, max=1.0, step=3, precision=2)
+    relight_max_color_tint: bpy.props.FloatProperty(name='RELIGHT_max_color_tint', description='', default=2.0, subtype='NONE', unit='NONE', min=0.0, step=3, precision=2)
+    relight_include_world_environment: bpy.props.BoolProperty(name='RELIGHT_include_world_environment', description='', default=True)
+    relight_include_scene_lights: bpy.props.BoolProperty(name='RELIGHT_include_scene_lights', description='', default=True)
+    relight_scene_light_gain: bpy.props.FloatProperty(name='RELIGHT_scene_light_gain', description='', default=1.0, subtype='NONE', unit='NONE', min=0.0, max=1.0, step=3, precision=2)
+    relight_use_light_shadows: bpy.props.BoolProperty(name='RELIGHT_use_light_shadows', description='', default=True)
+    include_hidden_lights: bpy.props.BoolProperty(name='include_hidden_lights', description='', default=False)
+    use_proxy_occlusion: bpy.props.BoolProperty(name='use_proxy_occlusion', description='', default=True)
+    occlusion_sample_count: bpy.props.IntProperty(name='occlusion_sample_count', description='', default=6, subtype='NONE', min=1)
+    occlusion_bias: bpy.props.FloatProperty(name='occlusion_bias', description='', default=0.0020000000949949026, subtype='NONE', unit='NONE', min=0.0, step=3, precision=3)
+    occlusion_max_distance: bpy.props.FloatProperty(name='occlusion_max_distance', description='', default=0.0, subtype='NONE', unit='NONE', min=0.0, step=3, precision=2)
+    light_shadow_bias: bpy.props.FloatProperty(name='light_shadow_bias', description='', default=0.0020000000949949026, subtype='NONE', unit='NONE', min=0.0, step=3, precision=3)
+    ambient_floor: bpy.props.FloatProperty(name='ambient_floor', description='Minimum ambient light factor before multiplying the base color', default=0.07999999821186066, subtype='NONE', unit='NONE', min=0.0, step=3, precision=2)
+    light_gain: bpy.props.FloatProperty(name='light_gain', description='Overall light factor multiplier', default=0.8500000238418579, subtype='NONE', unit='NONE', min=0.0, soft_max=1.0, step=3, precision=2)
+    light_power: bpy.props.FloatProperty(name='light_power', description='Contrast/power applied to the normalized light factor', default=0.75, subtype='NONE', unit='NONE', min=0.0, soft_max=1.0, step=3, precision=2)
+    max_light_factor: bpy.props.FloatProperty(name='max_light_factor', description='Clamp for the final light factor to avoid blow-outs', default=1.75, subtype='NONE', unit='NONE', min=0.0, step=3, precision=2)
+    irradiance_resolution: bpy.props.IntProperty(name='irradiance_resolution', description='', default=32, subtype='NONE', min=1)
+    irradiance_blur_strength: bpy.props.IntProperty(name='irradiance_blur_strength', description='', default=8, subtype='NONE', min=0)
+    irradiance_luminance_clamp: bpy.props.FloatProperty(name='irradiance_luminance_clamp', description='', default=10.0, subtype='NONE', unit='NONE', min=0.0, step=3, precision=2)
+    normal_smoothing: bpy.props.FloatProperty(name='normal_smoothing', description='Input: 0 = use proxy normals as-is, 1 = heavily smooth proxy normals before lighting', default=0.0, subtype='NONE', unit='NONE', min=0.0, max=1.0, step=3, precision=2)
+    pre_light_smoothing: bpy.props.FloatProperty(name='pre_light_smoothing', description='Input: 0 = use raw proxy-vertex lighting, 1 = strongly smooth proxy lighting before transfer', default=0.0, subtype='NONE', unit='NONE', min=0.0, max=1.0, step=3, precision=2)
+    post_light_smoothing: bpy.props.FloatProperty(name='post_light_smoothing', description='Input: 0 = keep transferred lighting detail, 1 = strongly smooth the transferred light cache', default=0.0, subtype='NONE', unit='NONE', min=0.0, max=1.0, step=3, precision=2)
+    transfer_style: bpy.props.EnumProperty(name='transfer_style', description='', items=[('Accurate', 'Accurate', '', 0, 0), ('Balanced', 'Balanced', '', 0, 1), ('Smooth', 'Smooth', '', 0, 2)])
+    transfer_smoothness: bpy.props.FloatProperty(name='transfer_smoothness', description='Extra smoothing amount used by Balanced and Smooth transfer styles', default=0.0, subtype='NONE', unit='NONE', min=0.0, max=1.0, step=3, precision=2)
+    indirect_strength: bpy.props.FloatProperty(name='indirect_strength', description='Overall strength of the baked indirect / HDRI fill', default=1.0, subtype='NONE', unit='NONE', min=0.0, max=1.0, step=3, precision=2)
+    direct_strength: bpy.props.FloatProperty(name='direct_strength', description='Overall strength of the baked direct light contribution', default=1.0, subtype='NONE', unit='NONE', min=0.0, max=1.0, step=3, precision=2)
+    occlusion_strength: bpy.props.FloatProperty(name='occlusion_strength', description='', default=0.699999988079071, subtype='NONE', unit='NONE', min=0.0, max=1.0, step=3, precision=2)
+    shadow_strength: bpy.props.FloatProperty(name='shadow_strength', description='Input: 0 = ignore baked direct-light shadowing, 1 = use baked shadowing fully', default=1.0, subtype='NONE', unit='NONE', min=0.0, max=1.0, step=3, precision=2)
+    export_mode: bpy.props.EnumProperty(name='export_mode', description='Compatible: writes final color to f_dc and zeros f_rest', items=[('Dampen Original SH', 'Dampen Original SH', '', 0, 0), ('Preserve Original SH', 'Preserve Original SH', '', 0, 1), ('Flatten SH', 'Flatten SH', '', 0, 2)])
+    directionality_strength: bpy.props.FloatProperty(name='directionality_strength', description='Only used by Dampen Saved Original Directionality; 0 = flat, 1 = full saved original directional strength', default=0.25, subtype='NONE', unit='NONE', min=0.0, max=1.0, step=3, precision=2)
+    light_bake_active_menu: bpy.props.EnumProperty(name='Light Bake Active Menu', description='', items=[('1. Store Light', '1. Store Light', '', 0, 0), ('2. Bake Light', '2. Bake Light', '', 0, 1), ('3. Apply Light', '3. Apply Light', '', 0, 2)])
+    max_color_tint_mode: bpy.props.EnumProperty(name='max_color_tint_mode', description='', items=[('Perceived Brightness', 'Perceived Brightness', '', 0, 0), ('Preserve Luminance', 'Preserve Luminance', '', 0, 1)])
+    hdri_max_width: bpy.props.IntProperty(name='hdri_max_width', description='Max HDRI width used for bake processing; 0 = full source resolution.', default=1024, subtype='NONE', min=0)
+    relight_baked_update_mode: bpy.props.EnumProperty(name='RELIGHT_BAKED_UPDATE_MODE', description='', items=[('None', 'None', '', 0, 0), ('Enabled Baked', 'Enabled Baked', '', 0, 1)])
 
 
 class SNA_GROUP_sna_dgs_object_properties_group(bpy.types.PropertyGroup):
     update_mode: bpy.props.EnumProperty(name='Update_Mode', description='', items=[('Disable Camera Updates', 'Disable Camera Updates', '', 0, 0), ('Enable Camera Updates', 'Enable Camera Updates', '', 0, 1), ('Show As Point Cloud', 'Show As Point Cloud', '', 0, 2)], update=sna_update_update_mode_868D4)
     cam_update: bpy.props.BoolProperty(name='Cam_Update', description='', default=False, update=sna_update_cam_update_DE26E)
+    rig_proxy_mesh: bpy.props.PointerProperty(name='RIG_Proxy_Mesh', description='', type=bpy.types.Object)
 
 
 class SNA_GROUP_sna_dgs_material_properties_group(bpy.types.PropertyGroup):
     lq_hq: bpy.props.EnumProperty(name='LQ_HQ', description='', items=[('LQ Mode (Dithered Alpha)', 'LQ Mode (Dithered Alpha)', '', 0, 0), ('HQ Mode (Blended Alpha)', 'HQ Mode (Blended Alpha)', '', 0, 1)], update=sna_update_lq_hq_065F9)
+
+
+class SNA_AddonPreferences_AB8B3(bpy.types.AddonPreferences):
+    bl_idname = __package__
+    sna_cache_file_directory: bpy.props.StringProperty(name='Cache File Directory', description='', default='', subtype='DIR_PATH', maxlen=0)
+    sna_show_tips: bpy.props.BoolProperty(name='Show Tips', description='', default=True)
+
+    def draw(self, context):
+        if not (False):
+            layout = self.layout 
+            box_D84AF = layout.box()
+            box_D84AF.alert = False
+            box_D84AF.enabled = True
+            box_D84AF.active = True
+            box_D84AF.use_property_split = False
+            box_D84AF.use_property_decorate = False
+            box_D84AF.alignment = 'Expand'.upper()
+            box_D84AF.scale_x = 1.0
+            box_D84AF.scale_y = 1.0
+            if not True: box_D84AF.operator_context = "EXEC_DEFAULT"
+            box_236E6 = box_D84AF.box()
+            box_236E6.alert = False
+            box_236E6.enabled = True
+            box_236E6.active = True
+            box_236E6.use_property_split = False
+            box_236E6.use_property_decorate = False
+            box_236E6.alignment = 'Expand'.upper()
+            box_236E6.scale_x = 1.0
+            box_236E6.scale_y = 1.0
+            if not True: box_236E6.operator_context = "EXEC_DEFAULT"
+            box_236E6.label(text='Cache', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')))
+            box_236E6.prop(bpy.context.preferences.addons[__package__].preferences, 'sna_cache_file_directory', text='Cache directory', icon_value=0, emboss=True)
+            box_F03E4 = box_236E6.box()
+            box_F03E4.alert = False
+            box_F03E4.enabled = True
+            box_F03E4.active = True
+            box_F03E4.use_property_split = False
+            box_F03E4.use_property_decorate = False
+            box_F03E4.alignment = 'Expand'.upper()
+            box_F03E4.scale_x = 1.0
+            box_F03E4.scale_y = 1.0
+            if not True: box_F03E4.operator_context = "EXEC_DEFAULT"
+            box_F03E4.label(text='If cache files are removed or disconnected, it may not be possible to restore the original state', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'warning.svg')))
+            box_F03E4.label(text='of light baked or rig-deformed objects. Try to maintained a stable cache location.', icon_value=0)
+            box_24429 = box_D84AF.box()
+            box_24429.alert = False
+            box_24429.enabled = True
+            box_24429.active = True
+            box_24429.use_property_split = False
+            box_24429.use_property_decorate = False
+            box_24429.alignment = 'Expand'.upper()
+            box_24429.scale_x = 1.0
+            box_24429.scale_y = 1.0
+            if not True: box_24429.operator_context = "EXEC_DEFAULT"
+            box_24429.label(text='Tips', icon_value=load_preview_icon(os.path.join(os.path.dirname(__file__), 'assets', 'pointer-right-fill.svg')))
+            box_24429.prop(bpy.context.preferences.addons[__package__].preferences, 'sna_show_tips', text='Show tips throughout the interface', icon_value=0, emboss=True)
 
 
 def register():
@@ -11261,60 +19183,63 @@ def register():
     bpy.types.Scene.sna_dgs_scene_properties = bpy.props.PointerProperty(name='3DGS Scene Properties', description='', type=SNA_GROUP_sna_dgs_scene_properties_group)
     bpy.types.Object.sna_dgs_object_properties = bpy.props.PointerProperty(name='3DGS Object Properties', description='', type=SNA_GROUP_sna_dgs_object_properties_group)
     bpy.types.Material.sna_dgs_material_properties = bpy.props.PointerProperty(name='3DGS Material Properties', description='', type=SNA_GROUP_sna_dgs_material_properties_group)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Launch_Kiri_Site_Bf973)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Launch_Superhive_Store_08F23)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Launch_Kiri_Blender_Addons_Page_9D58C)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Open_Documentation_3A04F)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Open_Tutorial_Video_0684A)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Launch_Site_Bf973)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Align_Active_To_X_Axis_6Ae0E)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Align_Active_To_Y_Axis_C305D)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Align_Active_To_Z_Axis_1E184)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Align_Active_To_View_30B13)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Remove_Animate_Modifier_5B34D)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Apply_Animate_Modifier_3938E)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Add_Animate_Modifier_39C55)
-    bpy.types.VIEW3D_MT_object_apply.prepend(sna_add_to_view3d_mt_object_apply_F9005)
+    bpy.types.VIEW3D_MT_object_apply.prepend(sna_add_to_view3d_mt_object_apply_4C860)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Apply_3Dgs_Tranforms_5B665)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Convert_Face_3Dgs_To_Vert_3Dgs_Fc49C)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Convert_Vert_3Dgs_To_Face_3Dgs_E6635)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Import_Image_Overlay_4A457)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Start_Vertex_Painting_A36E0)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Refresh__Create_Paint_Attribute_84655)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Export_Mesh_Object_As_3Dgs_Ply_Ce2F7)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Export_Mesh_As_3Dgs4Dgs_Ce2F7)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Generate_Hq_Object_55455)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Disable_Hq_Overlap_34678)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Update_Enabled_3Dgs_Objects_6D7F4)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Mesh23Dgs_3Dfed)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Refresh_Scene_C0B35)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Create_Proxy_From_Mesh_D5B41)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Advanced_Render_Ba196)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Clean_Up_Advanced_Render_Scene_09450)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Stop_Interval_Updates_5Ac80)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Clean_Up_Scene_80052)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Create_Proxy_From_Mesh_Eafbb)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Advanced_Render_147Af)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Refresh_Scene_A6719)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Stop_Interval_Updates_83370)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Auto_Generate_Crop_Object_F20D5)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Rotate_For_Blender_Axes_423De)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Import_Ply_E0A3A)
-    bpy.utils.register_class(SNA_PT_DGS_RENDER_BY_KIRI_ENGINE_A02CB)
+    bpy.utils.register_class(SNA_PT_DGS_RENDER_BY_KIRI_ENGINE_E1A83)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Apply_Modifier_0F5F2)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Remove_Modifier_9Cf0D)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Select_Object_B1F49)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Open_Output_Folder_82000)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Attribute_Select_51C86)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Select_By_Object_92F9C)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Build_Light_Data_Ab375)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Restore_Original_Light_9A7Fe)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Store_Original_Lighting_99939)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Apply_Light_Data_6C5Ad)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Add_Uv_Edit_Modifier_E8Ae6)
+    bpy.app.handlers.render_pre.append(render_pre_handler_77179)
+    bpy.utils.register_class(SNA_AddonPreferences_AB8B3)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Bind_To_Proxy_Mesh_6C58F)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Select_Proxy_Mesh_E76B7)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Update_Bound_3Dgs_From_Proxy_Mesh_951A0)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Bake_Frames_To_Cache_90885)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Unbind_From_Proxy_Mesh_7648D)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Update_Bound_3Dgs_From_Cache_385Ec)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_End_Proxy_Rig_Updates_60C6A)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Clear_Rig_Cache_F38Be)
+    bpy.utils.register_class(SNA_OT_Dgs_Render_Apply_Armature_Pose_As_Rest_Pose_A8C68)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Append_Wire_Sphere_2Bf63)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Append_Wire_Cube_56E0F)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Append_Geometry_Node_Modifier_C2492)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Remove_Higher_Sh_Attributes_Cb703)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Remove_Adjust_Attributes_Modifier_Fbc71)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Apply_Adjust_Attributes_Modifier_Aefe7)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Remove_Adjust_Attribute_Modifier_C5491)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Apply_Adjust_Attribute_Modifier_B24A5)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Remove_Higher_Sh_Attributes_86F09)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Remove_Camera_Cull_Modifier_F15Ee)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Auto_Set_Up_Camera_Cull_Properties_Aef48)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Apply_Camera_Cull_Modifier_7C6F7)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Remove_Colour_Edit_Modifier_6255F)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Apply_Colour_Edit_Modifier_C83C4)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Remove_Convert_To_Rough_Mesh_Modifier_A8C4C)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Apply_Convert_To_Rough_Mesh_Modifier_9F4B2)
     bpy.utils.register_class(SNA_OT_Dgs_Render_Append_Rough_Mesh_Modifier_65Da3)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Remove_Crop_Box_Modifier_64Ea6)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Apply_Crop_Box_Modifier_Bfdca)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Remove_Decimate_Modifier_Fff1B)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Apply_Decimate_Modifier_7A32C)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Remove_Remove_By_Size_Modifier_3A0E5)
-    bpy.utils.register_class(SNA_OT_Dgs_Render_Apply_Remove_By_Size_Modifier_6Dbab)
 
 
 def unregister():
@@ -11331,57 +19256,60 @@ def unregister():
     bpy.utils.unregister_class(SNA_GROUP_sna_dgs_material_properties_group)
     bpy.utils.unregister_class(SNA_GROUP_sna_dgs_object_properties_group)
     bpy.utils.unregister_class(SNA_GROUP_sna_dgs_scene_properties_group)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Launch_Kiri_Site_Bf973)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Launch_Superhive_Store_08F23)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Launch_Kiri_Blender_Addons_Page_9D58C)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Open_Documentation_3A04F)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Open_Tutorial_Video_0684A)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Launch_Site_Bf973)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Align_Active_To_X_Axis_6Ae0E)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Align_Active_To_Y_Axis_C305D)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Align_Active_To_Z_Axis_1E184)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Align_Active_To_View_30B13)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Remove_Animate_Modifier_5B34D)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Apply_Animate_Modifier_3938E)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Add_Animate_Modifier_39C55)
-    bpy.types.VIEW3D_MT_object_apply.remove(sna_add_to_view3d_mt_object_apply_F9005)
+    bpy.types.VIEW3D_MT_object_apply.remove(sna_add_to_view3d_mt_object_apply_4C860)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Apply_3Dgs_Tranforms_5B665)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Convert_Face_3Dgs_To_Vert_3Dgs_Fc49C)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Convert_Vert_3Dgs_To_Face_3Dgs_E6635)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Import_Image_Overlay_4A457)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Start_Vertex_Painting_A36E0)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Refresh__Create_Paint_Attribute_84655)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Export_Mesh_Object_As_3Dgs_Ply_Ce2F7)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Export_Mesh_As_3Dgs4Dgs_Ce2F7)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Generate_Hq_Object_55455)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Disable_Hq_Overlap_34678)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Update_Enabled_3Dgs_Objects_6D7F4)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Mesh23Dgs_3Dfed)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Refresh_Scene_C0B35)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Create_Proxy_From_Mesh_D5B41)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Advanced_Render_Ba196)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Clean_Up_Advanced_Render_Scene_09450)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Stop_Interval_Updates_5Ac80)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Clean_Up_Scene_80052)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Create_Proxy_From_Mesh_Eafbb)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Advanced_Render_147Af)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Refresh_Scene_A6719)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Stop_Interval_Updates_83370)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Auto_Generate_Crop_Object_F20D5)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Rotate_For_Blender_Axes_423De)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Import_Ply_E0A3A)
-    bpy.utils.unregister_class(SNA_PT_DGS_RENDER_BY_KIRI_ENGINE_A02CB)
+    bpy.utils.unregister_class(SNA_PT_DGS_RENDER_BY_KIRI_ENGINE_E1A83)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Apply_Modifier_0F5F2)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Remove_Modifier_9Cf0D)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Select_Object_B1F49)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Open_Output_Folder_82000)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Attribute_Select_51C86)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Select_By_Object_92F9C)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Build_Light_Data_Ab375)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Restore_Original_Light_9A7Fe)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Store_Original_Lighting_99939)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Apply_Light_Data_6C5Ad)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Add_Uv_Edit_Modifier_E8Ae6)
+    bpy.app.handlers.render_pre.remove(render_pre_handler_77179)
+    bpy.utils.unregister_class(SNA_AddonPreferences_AB8B3)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Bind_To_Proxy_Mesh_6C58F)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Select_Proxy_Mesh_E76B7)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Update_Bound_3Dgs_From_Proxy_Mesh_951A0)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Bake_Frames_To_Cache_90885)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Unbind_From_Proxy_Mesh_7648D)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Update_Bound_3Dgs_From_Cache_385Ec)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_End_Proxy_Rig_Updates_60C6A)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Clear_Rig_Cache_F38Be)
+    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Apply_Armature_Pose_As_Rest_Pose_A8C68)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Append_Wire_Sphere_2Bf63)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Append_Wire_Cube_56E0F)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Append_Geometry_Node_Modifier_C2492)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Remove_Higher_Sh_Attributes_Cb703)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Remove_Adjust_Attributes_Modifier_Fbc71)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Apply_Adjust_Attributes_Modifier_Aefe7)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Remove_Adjust_Attribute_Modifier_C5491)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Apply_Adjust_Attribute_Modifier_B24A5)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Remove_Higher_Sh_Attributes_86F09)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Remove_Camera_Cull_Modifier_F15Ee)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Auto_Set_Up_Camera_Cull_Properties_Aef48)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Apply_Camera_Cull_Modifier_7C6F7)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Remove_Colour_Edit_Modifier_6255F)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Apply_Colour_Edit_Modifier_C83C4)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Remove_Convert_To_Rough_Mesh_Modifier_A8C4C)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Apply_Convert_To_Rough_Mesh_Modifier_9F4B2)
     bpy.utils.unregister_class(SNA_OT_Dgs_Render_Append_Rough_Mesh_Modifier_65Da3)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Remove_Crop_Box_Modifier_64Ea6)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Apply_Crop_Box_Modifier_Bfdca)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Remove_Decimate_Modifier_Fff1B)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Apply_Decimate_Modifier_7A32C)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Remove_Remove_By_Size_Modifier_3A0E5)
-    bpy.utils.unregister_class(SNA_OT_Dgs_Render_Apply_Remove_By_Size_Modifier_6Dbab)
