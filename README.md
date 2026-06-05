@@ -1,4 +1,7 @@
 
+<img width="1280" height="720" alt="main" src="https://github.com/user-attachments/assets/1e0e669a-6505-47dd-83ed-bb39403c12dc" />
+
+
 # 3DGS Render Blender Addon by KIRI Engine
 <a href="./LICENSE">
         <img alt="License" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
