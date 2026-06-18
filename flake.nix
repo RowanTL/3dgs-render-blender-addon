@@ -9,7 +9,12 @@
     { self, nixpkgs }:
     let
       system = "x86_64-linux";
-      pkgs = nixpkgs.legacyPackages.${system};
+      pkgs = import nixpkgs {
+        inherit system;
+        config = {
+          allowUnfree = true;
+        };
+      };
     in
     {
       devShells.${system}.default = pkgs.mkShell {
@@ -18,12 +23,26 @@
           pkgs.uv
           pkgs.ruff
           pkgs.ty
-          pkgs.libx11
+          pkgs.vscode
         ];
+        shellHook =
+        let
+          ldLibraryPath = pkgs.lib.makeLibraryPath (with pkgs; [
+            libx11
+            libxrender
+            libxfixes
+            libxi
+            libxkbcommon
+            stdenv.cc.cc.lib
+            libsm
+            libice
+            libGL
+            libz
+          ]);
+        in
+        ''
+          export LD_LIBRARY_PATH=${ldLibraryPath}:$LD_LIBRARY_PATH;
+        '';
       };
-      shellHook = ''
-        export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [ pkgs.libx11 ]}:$LD_LIBRARY_PATH;
-        echo "hi"
-      '';
     };
 }
