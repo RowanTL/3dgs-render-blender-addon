@@ -18,7 +18,12 @@
           pkgs.uv
           pkgs.ruff
           pkgs.ty
+          pkgs.libx11
         ];
       };
+      shellHook = ''
+        export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [ pkgs.libx11 ]}:$LD_LIBRARY_PATH;
+        echo "hi"
+      '';
     };
 }
